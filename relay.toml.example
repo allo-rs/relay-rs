@@ -1,0 +1,28 @@
+# relay-rs 配置示例
+# 默认路径: /etc/relay-rs/relay.toml
+
+# 单端口转发：将本机 10000 端口流量转发到 example.com:443
+[[rules]]
+sport = 10000
+dport = 443
+target = "example.com"
+protocol = "tcp"      # tcp | udp | all
+ip_version = "ipv4"   # ipv4 | ipv6 | all
+comment = "转发 HTTPS 到 example.com"
+
+# 转发 UDP 流量（适用于 WireGuard、游戏等）
+[[rules]]
+sport = 51820
+dport = 51820
+target = "10.0.0.1"
+protocol = "udp"
+ip_version = "ipv4"
+comment = "WireGuard 中转"
+
+# 双栈转发（自动选择 IPv4）
+[[rules]]
+sport = 8080
+dport = 80
+target = "backend.internal"
+protocol = "all"
+ip_version = "all"
