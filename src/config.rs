@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fs;
 
 // ── 枚举 ──────────────────────────────────────────────────────────
@@ -20,19 +20,37 @@ pub enum Chain {
     Forward,
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum Balance {
+    #[default]
+    RoundRobin,
+    Random,
+}
+
 // ── 配置结构 ──────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ForwardRule {
     /// 本机监听端口，单端口 "10000" 或端口段 "10000-10100"
     pub listen: String,
-    /// 目标地址，格式 "host:port"，如 "example.com:443"
-    pub to: String,
+    /// 目标地址，单个 "host:port" 或多个 ["host1:port", "host2:port"]
+    #[serde(
+        deserialize_with = "deser_one_or_many",
+        serialize_with = "ser_one_or_many"
+    )]
+    pub to: Vec<String>,
     #[serde(default)]
     pub proto: Proto,
     /// 强制使用 IPv6 解析（默认 false，自动优先 IPv4）
     #[serde(default)]
     pub ipv6: bool,
+    /// 多目标负载均衡策略（默认 round-robin）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub balance: Option<Balance>,
+    /// 速率限制，直接传给 nftables，如 "10 mbytes/second"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<String>,
     pub comment: Option<String>,
 }
 
@@ -108,6 +126,30 @@ impl Target {
         let port_start = port_str.trim().parse::<u16>()
             .map_err(|_| format!("无效端口: {}", port_str))?;
         Ok(Target { host: host.to_string(), port_start })
+    }
+}
+
+// ── 自定义 serde：单字符串或字符串数组 ───────────────────────────
+
+fn deser_one_or_many<'de, D>(d: D) -> Result<Vec<String>, D::Error>
+where D: Deserializer<'de>
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany { One(String), Many(Vec<String>) }
+    match OneOrMany::deserialize(d)? {
+        OneOrMany::One(s)  => Ok(vec![s]),
+        OneOrMany::Many(v) => Ok(v),
+    }
+}
+
+fn ser_one_or_many<S>(v: &[String], s: S) -> Result<S::Ok, S::Error>
+where S: Serializer
+{
+    if v.len() == 1 {
+        s.serialize_str(&v[0])
+    } else {
+        v.serialize(s)
     }
 }
 
