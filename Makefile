@@ -26,7 +26,7 @@ release-major:
 
 _do_release:
 	@echo "$(CURRENT) → $(NEXT)"
-	@sed -i 's/^version = "$(CURRENT)"/version = "$(NEXT)"/' Cargo.toml
+	@sed -i '' 's/^version = "$(CURRENT)"/version = "$(NEXT)"/' Cargo.toml
 	@git add Cargo.toml
 	@git commit -m "chore: bump version to $(NEXT)"
 	@git tag -a v$(NEXT) -m "Release v$(NEXT)"
