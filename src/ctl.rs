@@ -135,10 +135,13 @@ fn probe_target(to_str: &str, ipv6: bool, proto: &Proto) {
     };
 
     match addr_str.parse::<std::net::SocketAddr>() {
-        Ok(addr) => match TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
-            Ok(_)  => println!("  ✓  {}  (→ {})", to_str, ip),
-            Err(e) => println!("  ✗  {}  (→ {})  {}", to_str, ip, e),
-        },
+        Ok(addr) => {
+            let t0 = std::time::Instant::now();
+            match TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
+                Ok(_)  => println!("  ✓  {}  (→ {})  {}ms", to_str, ip, t0.elapsed().as_millis()),
+                Err(e) => println!("  ✗  {}  (→ {})  {}", to_str, ip, e),
+            }
+        }
         Err(e) => println!("  ✗  {} — 地址解析失败: {}", to_str, e),
     }
 }
