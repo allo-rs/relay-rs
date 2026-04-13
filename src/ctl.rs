@@ -88,6 +88,12 @@ fn add_forward(config: &mut Config, theme: &ColorfulTheme) -> Result<(), Box<dyn
         _ => Proto::All,
     };
 
+    let ip_ver = Select::with_theme(theme)
+        .with_prompt("目标域名解析方式")
+        .items(&["IPv4（默认）", "IPv6"])
+        .default(0)
+        .interact()?;
+
     let comment: String = Input::with_theme(theme)
         .with_prompt("备注（可选，直接回车跳过）")
         .allow_empty(true)
@@ -97,7 +103,7 @@ fn add_forward(config: &mut Config, theme: &ColorfulTheme) -> Result<(), Box<dyn
         listen,
         to,
         proto,
-        ipv6: false,
+        ipv6: ip_ver == 1,
         comment: if comment.is_empty() { None } else { Some(comment) },
     });
 
