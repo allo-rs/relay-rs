@@ -3,6 +3,7 @@ mod ip;
 mod nft;
 
 use clap::{Parser, Subcommand};
+use nft::ResolvedForward;
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -15,11 +16,11 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
 
-    /// 配置文件路径（仅守护进程模式）
+    /// 配置文件路径
     #[arg(short, long, default_value = CONFIG_PATH, global = true)]
     config: String,
 
-    /// 轮询间隔秒数（仅守护进程模式）
+    /// 轮询间隔秒数
     #[arg(short, long, default_value_t = 60, global = true)]
     interval: u64,
 }
@@ -44,14 +45,14 @@ enum Command {
 
 fn main() {
     let cli = Cli::parse();
-
     match cli.command {
         Some(cmd) => run_ctl(cmd, &cli.config),
         None => run_daemon(&cli.config, cli.interval),
     }
 }
 
-/// 管理子命令
+// ── 管理子命令 ────────────────────────────────────────────────────
+
 fn run_ctl(cmd: Command, config: &str) {
     match cmd {
         Command::Start   => systemctl("start"),
@@ -88,16 +89,14 @@ fn edit_config(config: &str) {
         .unwrap_or_else(|e| { eprintln!("打开编辑器 {} 失败: {}", editor, e); std::process::exit(1); });
 }
 
-/// 守护进程模式
+// ── 守护进程模式 ──────────────────────────────────────────────────
+
 fn run_daemon(config_path: &str, interval: u64) {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-
     enable_ip_forwarding();
-
-    log::info!("relay-rs 启动，配置文件: {}，轮询间隔: {}s", config_path, interval);
+    log::info!("relay-rs 启动，配置: {}，轮询: {}s", config_path, interval);
 
     let mut last_script = String::new();
-
     loop {
         match tick(&mut last_script, config_path) {
             Ok(true)  => log::info!("规则已更新并应用"),
@@ -109,50 +108,43 @@ fn run_daemon(config_path: &str, interval: u64) {
 }
 
 fn tick(last_script: &mut String, config_path: &str) -> Result<bool, Box<dyn std::error::Error>> {
-    let config = config::load(config_path)?;
+    let cfg = config::load(config_path)?;
 
-    if config.rules.is_empty() {
+    if cfg.forward.is_empty() && cfg.block.is_empty() {
         log::warn!("配置中没有任何规则");
     }
 
-    let resolved: Vec<(config::Rule, Option<String>)> = config
-        .rules
-        .into_iter()
-        .filter_map(|rule| {
-            match rule.target() {
-                // 转发规则：需要 DNS 解析
-                Some(target) => match ip::resolve(target, rule.ip_version()) {
-                    Ok(ips) => {
-                        let ip = ips.into_iter().next().unwrap();
-                        log::debug!("解析 {} → {}", target, ip);
-                        Some((rule, Some(ip)))
-                    }
-                    Err(e) => {
-                        log::warn!("跳过规则 (target={}): {}", target, e);
-                        None
-                    }
-                },
-                // Drop 规则：不需要 DNS 解析
-                None => Some((rule, None)),
+    // 解析转发规则的 DNS
+    let forwards: Vec<ResolvedForward> = cfg.forward.into_iter().filter_map(|rule| {
+        let listen = match config::Listen::parse(&rule.listen) {
+            Ok(l) => l,
+            Err(e) => { log::warn!("跳过转发规则: {}", e); return None; }
+        };
+        let target = match config::Target::parse(&rule.to) {
+            Ok(t) => t,
+            Err(e) => { log::warn!("跳过转发规则: {}", e); return None; }
+        };
+        match ip::resolve(&target.host, rule.ipv6) {
+            Ok(ip) => {
+                log::debug!("{} → {}", target.host, ip);
+                Some(ResolvedForward { rule, listen, target, ip })
             }
-        })
-        .collect();
+            Err(e) => { log::warn!("跳过转发规则 ({}): {}", target.host, e); None }
+        }
+    }).collect();
 
-    let script = nft::build_script(&resolved);
+    let script = nft::build_script(&forwards, &cfg.block);
     if script == *last_script {
         return Ok(false);
     }
 
-    nft::apply(&resolved)?;
+    nft::apply(&forwards, &cfg.block)?;
     *last_script = script;
     Ok(true)
 }
 
 fn enable_ip_forwarding() {
-    for path in [
-        "/proc/sys/net/ipv4/ip_forward",
-        "/proc/sys/net/ipv6/conf/all/forwarding",
-    ] {
+    for path in ["/proc/sys/net/ipv4/ip_forward", "/proc/sys/net/ipv6/conf/all/forwarding"] {
         match std::fs::write(path, "1") {
             Ok(_)  => log::debug!("已启用 {}", path),
             Err(e) => log::warn!("无法写入 {}: {}（非 root 运行？）", path, e),

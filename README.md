@@ -55,33 +55,51 @@ sudo vim /etc/relay-rs/relay.toml
 
 ### 配置格式
 
-通过 `type` 字段选择规则类型。
-
-#### 单端口转发（`type = "single"`）
+#### 转发规则（`[[forward]]`）
 
 ```toml
-[[rules]]
-type = "single"
-sport = 10000          # 本机监听端口
-dport = 443            # 目标端口
-target = "example.com" # 目标域名或 IP（支持 IPv4/IPv6）
-protocol = "tcp"       # tcp | udp | all（默认 all）
-ip_version = "ipv4"    # ipv4 | ipv6 | all（默认 ipv4）
-comment = "可选备注"   # 会写入 nftables 规则注释
+# 单端口
+[[forward]]
+listen = 10000             # 本机监听端口
+to = "example.com:443"     # 目标地址（域名或 IP + 端口）
+proto = "tcp"              # tcp | udp | all（默认 all）
+comment = "备注"
+
+# 端口段：10000-10100 → 10.0.0.1:20000-20100
+[[forward]]
+listen = "10000-10100"
+to = "10.0.0.1:20000"     # 目标起始端口，范围自动对齐
+proto = "tcp"
+
+# 强制 IPv6
+[[forward]]
+listen = 10000
+to = "example.com:443"
+ipv6 = true
 ```
 
-#### 端口段转发（`type = "range"`）
+#### 防火墙规则（`[[block]]`）
 
 ```toml
-[[rules]]
-type = "range"
-sport_start = 10000    # 本机端口段起始
-sport_end = 10100      # 本机端口段结束
-dport_start = 20000    # 目标端口段起始（省略则与 sport_start 相同）
-target = "10.0.0.1"
-protocol = "tcp"
-ip_version = "ipv4"
-comment = "端口段 10000-10100 → 10.0.0.1:20000-20100"
+# 封禁 IP
+[[block]]
+src = "1.2.3.4"
+comment = "封禁扫描 IP"
+
+# 封禁 CIDR
+[[block]]
+src = "192.168.100.0/24"
+
+# 禁止访问指定端口
+[[block]]
+port = 3306
+proto = "tcp"
+comment = "禁止外部访问 MySQL"
+
+# 封禁转发链
+[[block]]
+src = "10.0.0.0/8"
+chain = "forward"
 ```
 
 ## 用法

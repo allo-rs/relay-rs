@@ -1,67 +1,54 @@
-# relay-rs 配置示例
+# relay-rs 配置文件
 # 默认路径: /etc/relay-rs/relay.toml
 
-# ── 单端口转发 ──────────────────────────────────────────────────
-[[rules]]
-type = "single"
-sport = 10000          # 本机监听端口
-dport = 443            # 目标端口
-target = "example.com" # 目标域名或 IP
-protocol = "tcp"       # tcp | udp | all（默认 all）
-ip_version = "ipv4"    # ipv4 | ipv6 | all（默认 ipv4）
-comment = "转发 HTTPS 到 example.com"
+# ── 转发规则 ────────────────────────────────────────────────────────
+# listen: 本机监听端口（单端口或端口段）
+# to:     目标地址，格式 "host:port"
+# proto:  tcp | udp | all（默认 all）
+# ipv6:   true 则强制解析 IPv6（默认 false，优先 IPv4）
+# comment: 备注（可选）
 
-# ── 端口段转发 ──────────────────────────────────────────────────
-[[rules]]
-type = "range"
-sport_start = 10000    # 本机端口段起始
-sport_end = 10100      # 本机端口段结束
-dport_start = 20000    # 目标端口段起始（省略则与 sport_start 相同，即仅改目标 IP）
-target = "10.0.0.1"
-protocol = "tcp"
-ip_version = "ipv4"
-comment = "端口段 10000-10100 → 10.0.0.1:20000-20100"
+[[forward]]
+listen = 10000
+to = "example.com:443"
+proto = "tcp"
+comment = "转发 HTTPS"
 
-# ── UDP 转发（WireGuard、游戏等）──────────────────────────────────
-[[rules]]
-type = "single"
-sport = 51820
-dport = 51820
-target = "10.0.0.1"
-protocol = "udp"
-ip_version = "ipv4"
+[[forward]]
+listen = 51820
+to = "10.0.0.1:51820"
+proto = "udp"
 comment = "WireGuard 中转"
 
-# ── Drop 防火墙规则 ─────────────────────────────────────────────
-# 封禁指定 IP（入站）
-[[rules]]
-type = "drop"
-chain = "input"
-src_ip = "1.2.3.4"
-ip_version = "ipv4"
+# 端口段：10000-10100 → 10.0.0.1:20000-20100
+[[forward]]
+listen = "10000-10100"
+to = "10.0.0.1:20000"
+proto = "tcp"
+comment = "批量端口转发"
+
+# ── 防火墙规则 ──────────────────────────────────────────────────────
+# src:   源 IP 或 CIDR（可选）
+# dst:   目标 IP 或 CIDR（可选）
+# port:  目标端口（可选）
+# proto: tcp | udp | all（默认 all）
+# chain: input | forward（默认 input）
+# ipv6:  true 则匹配 IPv6（默认 false）
+
+[[block]]
+src = "1.2.3.4"
 comment = "封禁扫描 IP"
 
-# 封禁 IP 段（CIDR）
-[[rules]]
-type = "drop"
-chain = "input"
-src_ip = "192.168.100.0/24"
-ip_version = "ipv4"
+[[block]]
+src = "192.168.100.0/24"
 comment = "封禁整个网段"
 
-# 禁止外部访问数据库端口
-[[rules]]
-type = "drop"
-chain = "input"
-dst_port = 3306
-protocol = "tcp"
-ip_version = "ipv4"
+[[block]]
+port = 3306
+proto = "tcp"
 comment = "禁止外部访问 MySQL"
 
-# 同时封 IPv4 + IPv6
-[[rules]]
-type = "drop"
-chain = "input"
-src_ip = "2001:db8::1"
-ip_version = "ipv6"
+[[block]]
+src = "2001:db8::1"
+ipv6 = true
 comment = "封禁 IPv6 地址"
