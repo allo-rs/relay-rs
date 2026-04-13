@@ -31,3 +31,37 @@ target = "10.0.0.1"
 protocol = "udp"
 ip_version = "ipv4"
 comment = "WireGuard 中转"
+
+# ── Drop 防火墙规则 ─────────────────────────────────────────────
+# 封禁指定 IP（入站）
+[[rules]]
+type = "drop"
+chain = "input"
+src_ip = "1.2.3.4"
+ip_version = "ipv4"
+comment = "封禁扫描 IP"
+
+# 封禁 IP 段（CIDR）
+[[rules]]
+type = "drop"
+chain = "input"
+src_ip = "192.168.100.0/24"
+ip_version = "ipv4"
+comment = "封禁整个网段"
+
+# 禁止外部访问数据库端口
+[[rules]]
+type = "drop"
+chain = "input"
+dst_port = 3306
+protocol = "tcp"
+ip_version = "ipv4"
+comment = "禁止外部访问 MySQL"
+
+# 同时封 IPv4 + IPv6
+[[rules]]
+type = "drop"
+chain = "input"
+src_ip = "2001:db8::1"
+ip_version = "ipv6"
+comment = "封禁 IPv6 地址"

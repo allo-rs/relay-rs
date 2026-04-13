@@ -115,20 +115,25 @@ fn tick(last_script: &mut String, config_path: &str) -> Result<bool, Box<dyn std
         log::warn!("配置中没有任何规则");
     }
 
-    let resolved: Vec<(config::Rule, String)> = config
+    let resolved: Vec<(config::Rule, Option<String>)> = config
         .rules
         .into_iter()
         .filter_map(|rule| {
-            match ip::resolve(rule.target(), rule.ip_version()) {
-                Ok(ips) => {
-                    let ip = ips.into_iter().next().unwrap();
-                    log::debug!("解析 {} → {}", rule.target(), ip);
-                    Some((rule, ip))
-                }
-                Err(e) => {
-                    log::warn!("跳过规则 (target={}): {}", rule.target(), e);
-                    None
-                }
+            match rule.target() {
+                // 转发规则：需要 DNS 解析
+                Some(target) => match ip::resolve(target, rule.ip_version()) {
+                    Ok(ips) => {
+                        let ip = ips.into_iter().next().unwrap();
+                        log::debug!("解析 {} → {}", target, ip);
+                        Some((rule, Some(ip)))
+                    }
+                    Err(e) => {
+                        log::warn!("跳过规则 (target={}): {}", target, e);
+                        None
+                    }
+                },
+                // Drop 规则：不需要 DNS 解析
+                None => Some((rule, None)),
             }
         })
         .collect();
