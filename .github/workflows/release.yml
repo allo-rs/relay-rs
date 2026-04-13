@@ -24,7 +24,7 @@ jobs:
             artifact: relay-rs-aarch64
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: 安装 Rust 工具链
         uses: dtolnay/rust-toolchain@stable
@@ -43,7 +43,7 @@ jobs:
         run: cp target/${{ matrix.target }}/release/relay-rs ${{ matrix.artifact }}
 
       - name: 上传 artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
@@ -54,10 +54,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: 下载所有 artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           path: artifacts
           merge-multiple: true
