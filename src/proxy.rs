@@ -306,13 +306,10 @@ async fn relay(
     state: SharedState,
     dns_cache: DnsCache,
 ) {
-    // Block 规则检查（精确 IP 匹配）
+    // Block 规则检查（精确 IP 或 CIDR，如 10.0.0.0/8）
     let peer_ip = peer.ip();
     let blocked = state.block_rules.iter().any(|b| {
-        b.src
-            .as_deref()
-            .map(|s| s == peer_ip.to_string())
-            .unwrap_or(false)
+        b.src.as_deref().map(|s| ip_matches(peer_ip, s)).unwrap_or(false)
     });
     if blocked {
         log::debug!("拦截来自 {} 的连接（block 规则）", peer);
@@ -576,4 +573,34 @@ fn fmt_bytes(b: u64) -> String {
     if b >= 1 << 20      { format!("{:.1} MB", b as f64 / (1u64 << 20) as f64) }
     else if b >= 1 << 10 { format!("{:.1} KB", b as f64 / (1u64 << 10) as f64) }
     else                 { format!("{} B", b) }
+}
+
+/// 判断 IP 是否匹配 `spec`（精确 IP 或 CIDR，如 "1.2.3.4" 或 "10.0.0.0/8"）
+fn ip_matches(ip: std::net::IpAddr, spec: &str) -> bool {
+    use std::net::IpAddr;
+
+    // 先尝试解析为精确 IP
+    if let Ok(target) = spec.parse::<IpAddr>() {
+        return ip == target;
+    }
+
+    // 解析 CIDR：拆分 "地址/前缀长度"
+    let Some((addr_str, prefix_str)) = spec.split_once('/') else { return false };
+    let Ok(prefix_len) = prefix_str.parse::<u32>() else { return false };
+
+    match (ip, addr_str.parse::<IpAddr>()) {
+        (IpAddr::V4(peer), Ok(IpAddr::V4(net))) => {
+            if prefix_len > 32 { return false; }
+            let mask = if prefix_len == 0 { 0u32 } else { !0u32 << (32 - prefix_len) };
+            (u32::from(peer) & mask) == (u32::from(net) & mask)
+        }
+        (IpAddr::V6(peer), Ok(IpAddr::V6(net))) => {
+            if prefix_len > 128 { return false; }
+            let peer = u128::from(peer);
+            let net  = u128::from(net);
+            let mask = if prefix_len == 0 { 0u128 } else { !0u128 << (128 - prefix_len) };
+            (peer & mask) == (net & mask)
+        }
+        _ => false, // 地址族不匹配
+    }
 }
