@@ -15,7 +15,7 @@ warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 
 # ── 检查 root ─────────────────────────────────────────────────────
-[[ $EUID -ne 0 ]] && error "请以 root 权限运行: sudo bash install.sh"
+[[ $EUID -ne 0 ]] && error "请以 root 权限运行: bash install.sh"
 
 # ── 检测架构 ──────────────────────────────────────────────────────
 ARCH=$(uname -m)
