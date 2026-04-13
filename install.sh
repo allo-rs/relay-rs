@@ -4,8 +4,8 @@ set -euo pipefail
 # ── 配置 ──────────────────────────────────────────────────────────
 REPO="allo-rs/relay-rs"
 # 国内访问 GitHub 慢时可设置代理，留空则直连
-# 例: GITHUB_PROXY="https://mirror.ghproxy.com/"
-GITHUB_PROXY="${GITHUB_PROXY:-https://mirror.ghproxy.com/}"
+# 例: GITHUB_PROXY="https://gh-proxy.org/"
+GITHUB_PROXY="${GITHUB_PROXY:-https://gh-proxy.org/}"
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/relay-rs"
 SERVICE_FILE="/etc/systemd/system/relay-rs.service"

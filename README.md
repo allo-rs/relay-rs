@@ -25,7 +25,7 @@ dnf install nftables
 国内服务器（走代理）：
 
 ```bash
-bash <(curl -fsSL https://mirror.ghproxy.com/https://raw.githubusercontent.com/allo-rs/relay-rs/main/install.sh)
+bash <(curl -fsSL https://gh-proxy.org/https://raw.githubusercontent.com/allo-rs/relay-rs/main/install.sh)
 ```
 
 境外服务器（直连）：
