@@ -55,17 +55,17 @@ mkdir -p "$CONFIG_DIR"
 if [[ ! -f "${CONFIG_DIR}/relay.toml" ]]; then
   cat > "${CONFIG_DIR}/relay.toml" <<'EOF'
 # relay-rs 配置文件
-# 文档: https://github.com/your-github-username/relay-rs
+# 使用 rr add 添加规则，或直接编辑此文件
 
-# 单端口转发示例（删除注释后生效）
-# [[rules]]
-# type = "single"
-# sport = 10000
-# dport = 443
-# target = "example.com"
-# protocol = "tcp"
-# ip_version = "ipv4"
-# comment = "示例规则"
+# 转发示例（取消注释后生效）：
+# [[forward]]
+# listen = 10000          # 本机监听端口
+# to = "example.com:443" # 目标地址
+# proto = "tcp"           # tcp | udp | all
+
+# 防火墙示例：
+# [[block]]
+# src = "1.2.3.4"         # 封禁来源 IP
 EOF
   info "已创建配置文件模板: ${CONFIG_DIR}/relay.toml"
   warn "请编辑配置文件后启动服务: vim ${CONFIG_DIR}/relay.toml"
