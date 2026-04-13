@@ -83,8 +83,11 @@ fn run_ctl(cmd: Command, config: &str) {
             match ctl::add(&mut cfg) {
                 Ok(_) => match config::save(&cfg, config) {
                     Ok(_) => {
-                        println!("已保存。运行 rr restart 使规则生效。");
                         ctl::list(&cfg);
+                        println!();
+                        if ctl::confirm("立即重启服务使规则生效？[Y/n]", true) {
+                            systemctl("restart");
+                        }
                     }
                     Err(e) => { eprintln!("保存失败: {}", e); std::process::exit(1); }
                 },
@@ -100,7 +103,13 @@ fn run_ctl(cmd: Command, config: &str) {
             println!();
             match ctl::del(&mut cfg, index) {
                 Ok(_) => match config::save(&cfg, config) {
-                    Ok(_) => println!("已保存。运行 rr restart 使规则生效。"),
+                    Ok(_) => {
+                        ctl::list(&cfg);
+                        println!();
+                        if ctl::confirm("立即重启服务使规则生效？[Y/n]", true) {
+                            systemctl("restart");
+                        }
+                    }
                     Err(e) => { eprintln!("保存失败: {}", e); std::process::exit(1); }
                 },
                 Err(e) => { eprintln!("错误: {}", e); std::process::exit(1); }

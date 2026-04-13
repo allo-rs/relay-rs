@@ -22,6 +22,18 @@ fn prompt_opt(msg: &str) -> Option<String> {
     if v.is_empty() { None } else { Some(v) }
 }
 
+pub fn confirm(msg: &str, default: bool) -> bool {
+    print!("{}: ", msg);
+    io::stdout().flush().unwrap();
+    let mut buf = String::new();
+    io::stdin().read_line(&mut buf).unwrap();
+    match buf.trim().to_lowercase().as_str() {
+        "y" | "yes" => true,
+        "n" | "no"  => false,
+        _            => default,
+    }
+}
+
 fn parse_proto(s: &str) -> Proto {
     match s.to_lowercase().as_str() {
         "tcp" => Proto::Tcp,
