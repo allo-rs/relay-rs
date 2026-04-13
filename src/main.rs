@@ -48,6 +48,8 @@ enum Command {
     Add,
     /// 交互式删除规则
     Del,
+    /// 查看各规则流量统计
+    Stats,
 }
 
 fn main() {
@@ -69,6 +71,7 @@ fn run_ctl(cmd: Command, config: &str) {
         Command::Log     => journalctl(),
         Command::Config  => edit_config(config),
         Command::Reload  => { edit_config(config); systemctl("restart"); }
+        Command::Stats   => ctl::stats(),
         Command::List    => {
             match config::load(config) {
                 Ok(cfg) => ctl::list(&cfg),

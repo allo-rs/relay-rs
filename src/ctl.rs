@@ -227,6 +227,112 @@ pub fn del(config: &mut Config) -> Result<bool, Box<dyn std::error::Error>> {
     Ok(true)
 }
 
+// ── rr stats ─────────────────────────────────────────────────────
+
+pub fn stats() {
+    let mut found = false;
+    for family in ["ip", "ip6"] {
+        let output = std::process::Command::new("nft")
+            .args(["list", "table", family, "relay-nat"])
+            .output();
+
+        let Ok(out) = output else { continue };
+        if !out.status.success() { continue }
+
+        let text = String::from_utf8_lossy(&out.stdout);
+        let entries = parse_counters(&text, family);
+        if entries.is_empty() { continue }
+
+        if !found {
+            println!("{:<4} {:<30} {:>10} {:>12}", "#", "规则", "包数", "流量");
+            println!("{}", "─".repeat(60));
+            found = true;
+        }
+
+        for (i, e) in entries.iter().enumerate() {
+            println!(
+                "{:<4} {:<30} {:>10} {:>12}",
+                i + 1,
+                truncate(&e.comment, 30),
+                format_packets(e.packets),
+                format_bytes(e.bytes),
+            );
+        }
+    }
+
+    if !found {
+        println!("暂无统计数据（服务是否已启动？）");
+    }
+}
+
+struct CounterEntry {
+    comment: String,
+    packets: u64,
+    bytes:   u64,
+}
+
+/// 从 nft list table 输出中提取 PREROUTING 链的计数器
+fn parse_counters(text: &str, _family: &str) -> Vec<CounterEntry> {
+    let mut in_prerouting = false;
+    let mut entries = Vec::new();
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.contains("chain PREROUTING") { in_prerouting = true; continue; }
+        if trimmed.starts_with("chain ") { in_prerouting = false; continue; }
+        if !in_prerouting { continue; }
+        if !trimmed.contains("counter packets") { continue; }
+
+        let packets = extract_u64(trimmed, "packets");
+        let bytes   = extract_u64(trimmed, "bytes");
+        let comment = extract_comment(trimmed);
+
+        entries.push(CounterEntry { comment, packets, bytes });
+    }
+
+    entries
+}
+
+fn extract_u64(s: &str, keyword: &str) -> u64 {
+    s.split_whitespace()
+        .skip_while(|w| *w != keyword)
+        .nth(1)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+}
+
+fn extract_comment(s: &str) -> String {
+    if let Some(start) = s.find("comment \"") {
+        let rest = &s[start + 9..];
+        if let Some(end) = rest.find('"') {
+            return rest[..end].to_string();
+        }
+    }
+    // 没有 comment 则取 dnat 目标
+    if let Some(idx) = s.find("dnat to ") {
+        return s[idx..].split_whitespace().take(3).collect::<Vec<_>>().join(" ");
+    }
+    "—".to_string()
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    // 简单按字节截断（中文字符占 3 字节，视觉上会短一些，够用）
+    if s.len() <= max { s.to_string() } else { format!("{}…", &s[..max - 3]) }
+}
+
+fn format_packets(n: u64) -> String {
+    if n >= 1_000_000 { format!("{:.1}M", n as f64 / 1_000_000.0) }
+    else if n >= 1_000 { format!("{:.1}K", n as f64 / 1_000.0) }
+    else { n.to_string() }
+}
+
+fn format_bytes(b: u64) -> String {
+    if b >= 1 << 30 { format!("{:.2} GB", b as f64 / (1 << 30) as f64) }
+    else if b >= 1 << 20 { format!("{:.2} MB", b as f64 / (1 << 20) as f64) }
+    else if b >= 1 << 10 { format!("{:.2} KB", b as f64 / (1 << 10) as f64) }
+    else { format!("{} B", b) }
+}
+
 // ── 确认提示 ──────────────────────────────────────────────────────
 
 pub fn confirm(msg: &str, default: bool) -> bool {

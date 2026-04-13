@@ -111,6 +111,7 @@ chain = "forward"
 安装后通过 `rr` 命令管理：
 
 ```bash
+rr stats    # 查看各规则流量统计
 rr start    # 启动服务
 rr stop     # 停止服务
 rr restart  # 重启服务
