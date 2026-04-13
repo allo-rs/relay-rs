@@ -2,7 +2,11 @@ use std::io;
 use std::net::IpAddr;
 use std::sync::OnceLock;
 
+use hickory_resolver::TokioAsyncResolver;
+use hickory_resolver::config::{ResolverConfig, ResolverOpts};
+
 static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+static RESOLVER: OnceLock<TokioAsyncResolver> = OnceLock::new();
 
 fn rt() -> &'static tokio::runtime::Runtime {
     RT.get_or_init(|| {
@@ -10,6 +14,16 @@ fn rt() -> &'static tokio::runtime::Runtime {
             .enable_all()
             .build()
             .expect("无法初始化 DNS runtime")
+    })
+}
+
+/// 全局复用的 resolver，hickory 内置 TTL 缓存自动生效
+fn resolver() -> &'static TokioAsyncResolver {
+    RESOLVER.get_or_init(|| {
+        // 在 tokio 上下文内构造，resolver 会捕获当前 runtime handle
+        rt().block_on(async {
+            TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
+        })
     })
 }
 
@@ -26,10 +40,7 @@ pub fn resolve_with_ttl(host: &str, ipv6: bool) -> io::Result<(String, u32)> {
 
     let host = host.to_string();
     rt().block_on(async move {
-        use hickory_resolver::TokioAsyncResolver;
-        use hickory_resolver::config::{ResolverConfig, ResolverOpts};
-
-        let resolver = TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
+        let resolver = resolver();
 
         if ipv6 {
             let lookup = resolver.ipv6_lookup(&host).await
