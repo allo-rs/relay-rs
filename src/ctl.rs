@@ -1,46 +1,5 @@
 use crate::config::{BlockRule, Chain, Config, ForwardRule, Proto};
-use std::io::{self, Write};
-
-// ── 公共工具 ──────────────────────────────────────────────────────
-
-/// 打印提示并读取一行输入，返回 default 若输入为空
-fn prompt(msg: &str, default: &str) -> String {
-    if default.is_empty() {
-        print!("{}: ", msg);
-    } else {
-        print!("{} [{}]: ", msg, default);
-    }
-    io::stdout().flush().unwrap();
-    let mut buf = String::new();
-    io::stdin().read_line(&mut buf).unwrap();
-    let input = buf.trim().to_string();
-    if input.is_empty() { default.to_string() } else { input }
-}
-
-fn prompt_opt(msg: &str) -> Option<String> {
-    let v = prompt(msg, "");
-    if v.is_empty() { None } else { Some(v) }
-}
-
-pub fn confirm(msg: &str, default: bool) -> bool {
-    print!("{}: ", msg);
-    io::stdout().flush().unwrap();
-    let mut buf = String::new();
-    io::stdin().read_line(&mut buf).unwrap();
-    match buf.trim().to_lowercase().as_str() {
-        "y" | "yes" => true,
-        "n" | "no"  => false,
-        _            => default,
-    }
-}
-
-fn parse_proto(s: &str) -> Proto {
-    match s.to_lowercase().as_str() {
-        "tcp" => Proto::Tcp,
-        "udp" => Proto::Udp,
-        _ => Proto::All,
-    }
-}
+use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
 
 // ── rr list ───────────────────────────────────────────────────────
 
@@ -94,60 +53,123 @@ pub fn list(config: &Config) {
 // ── rr add ────────────────────────────────────────────────────────
 
 pub fn add(config: &mut Config) -> Result<(), Box<dyn std::error::Error>> {
-    let kind = prompt("类型 [forward/block]", "forward");
+    let theme = ColorfulTheme::default();
 
-    match kind.as_str() {
-        "block" => add_block(config),
-        _ => add_forward(config),
+    let kind = Select::with_theme(&theme)
+        .with_prompt("规则类型")
+        .items(&["转发规则 (forward)", "防火墙规则 (block)"])
+        .default(0)
+        .interact()?;
+
+    match kind {
+        0 => add_forward(config, &theme),
+        _ => add_block(config, &theme),
     }
 }
 
-fn add_forward(config: &mut Config) -> Result<(), Box<dyn std::error::Error>> {
-    let listen = prompt("本机端口（单端口 10000 或端口段 10000-10100）", "");
-    if listen.is_empty() {
-        return Err("本机端口不能为空".into());
-    }
-    let to = prompt("目标地址（host:port）", "");
-    if to.is_empty() {
-        return Err("目标地址不能为空".into());
-    }
-    let proto_str = prompt("协议 [all/tcp/udp]", "all");
-    let ipv6_str  = prompt("使用 IPv6 [y/N]", "n");
-    let comment   = prompt_opt("备注（可选）");
+fn add_forward(config: &mut Config, theme: &ColorfulTheme) -> Result<(), Box<dyn std::error::Error>> {
+    let listen: String = Input::with_theme(theme)
+        .with_prompt("本机端口（单端口 10000 或端口段 10000-10100）")
+        .interact_text()?;
+
+    let to: String = Input::with_theme(theme)
+        .with_prompt("目标地址（host:port）")
+        .interact_text()?;
+
+    let proto_idx = Select::with_theme(theme)
+        .with_prompt("协议")
+        .items(&["all（默认）", "tcp", "udp"])
+        .default(0)
+        .interact()?;
+
+    let proto = match proto_idx {
+        1 => Proto::Tcp,
+        2 => Proto::Udp,
+        _ => Proto::All,
+    };
+
+    let ipv6 = Confirm::with_theme(theme)
+        .with_prompt("强制使用 IPv6")
+        .default(false)
+        .interact()?;
+
+    let comment: String = Input::with_theme(theme)
+        .with_prompt("备注（可选，直接回车跳过）")
+        .allow_empty(true)
+        .interact_text()?;
 
     config.forward.push(ForwardRule {
         listen,
         to,
-        proto: parse_proto(&proto_str),
-        ipv6: ipv6_str.to_lowercase() == "y",
-        comment,
+        proto,
+        ipv6,
+        comment: if comment.is_empty() { None } else { Some(comment) },
     });
 
     Ok(())
 }
 
-fn add_block(config: &mut Config) -> Result<(), Box<dyn std::error::Error>> {
-    let src     = prompt_opt("源 IP 或 CIDR（可选，如 1.2.3.4 或 10.0.0.0/8）");
-    let dst     = prompt_opt("目标 IP 或 CIDR（可选）");
-    let port_s  = prompt_opt("目标端口（可选）");
-    let port    = port_s.as_deref().and_then(|s| s.parse::<u16>().ok());
-    let proto_s = prompt("协议 [all/tcp/udp]", "all");
-    let chain_s = prompt("作用链 [input/forward]", "input");
-    let ipv6_s  = prompt("匹配 IPv6 [y/N]", "n");
-    let comment = prompt_opt("备注（可选）");
+fn add_block(config: &mut Config, theme: &ColorfulTheme) -> Result<(), Box<dyn std::error::Error>> {
+    let src: String = Input::with_theme(theme)
+        .with_prompt("源 IP 或 CIDR（可选，直接回车跳过）")
+        .allow_empty(true)
+        .interact_text()?;
+
+    let dst: String = Input::with_theme(theme)
+        .with_prompt("目标 IP 或 CIDR（可选）")
+        .allow_empty(true)
+        .interact_text()?;
+
+    let port: String = Input::with_theme(theme)
+        .with_prompt("目标端口（可选）")
+        .allow_empty(true)
+        .interact_text()?;
+
+    let port = port.parse::<u16>().ok();
+
+    let src = if src.is_empty() { None } else { Some(src) };
+    let dst = if dst.is_empty() { None } else { Some(dst) };
 
     if src.is_none() && dst.is_none() && port.is_none() {
         return Err("src / dst / port 至少填一项".into());
     }
 
+    let proto_idx = Select::with_theme(theme)
+        .with_prompt("协议")
+        .items(&["all（默认）", "tcp", "udp"])
+        .default(0)
+        .interact()?;
+
+    let proto = match proto_idx {
+        1 => Proto::Tcp,
+        2 => Proto::Udp,
+        _ => Proto::All,
+    };
+
+    let chain_idx = Select::with_theme(theme)
+        .with_prompt("作用链")
+        .items(&["input（入站，默认）", "forward（转发）"])
+        .default(0)
+        .interact()?;
+
+    let ipv6 = Confirm::with_theme(theme)
+        .with_prompt("匹配 IPv6")
+        .default(false)
+        .interact()?;
+
+    let comment: String = Input::with_theme(theme)
+        .with_prompt("备注（可选）")
+        .allow_empty(true)
+        .interact_text()?;
+
     config.block.push(BlockRule {
         src,
         dst,
         port,
-        proto: parse_proto(&proto_s),
-        chain: if chain_s.to_lowercase() == "forward" { Chain::Forward } else { Chain::Input },
-        ipv6: ipv6_s.to_lowercase() == "y",
-        comment,
+        proto,
+        chain: if chain_idx == 1 { Chain::Forward } else { Chain::Input },
+        ipv6,
+        comment: if comment.is_empty() { None } else { Some(comment) },
     });
 
     Ok(())
@@ -163,35 +185,58 @@ pub fn del(config: &mut Config) -> Result<bool, Box<dyn std::error::Error>> {
         return Ok(false);
     }
 
-    list(config);
-    println!();
+    // 构建选项列表
+    let mut items: Vec<String> = Vec::new();
+    for r in &config.forward {
+        let cmt = r.comment.as_deref().map(|s| format!(" # {}", s)).unwrap_or_default();
+        items.push(format!("[转发] {}  →  {}{}", r.listen, r.to, cmt));
+    }
+    for b in &config.block {
+        let mut parts = Vec::new();
+        if let Some(s) = &b.src  { parts.push(format!("src={}", s)); }
+        if let Some(d) = &b.dst  { parts.push(format!("dst={}", d)); }
+        if let Some(p) = b.port  { parts.push(format!("port={}", p)); }
+        let cmt = b.comment.as_deref().map(|s| format!(" # {}", s)).unwrap_or_default();
+        items.push(format!("[防火墙] {}{}", parts.join(" "), cmt));
+    }
+    items.push("取消".to_string());
 
-    let input = prompt("请输入要删除的序号（回车取消）", "");
-    if input.is_empty() {
+    let theme = ColorfulTheme::default();
+    let selection = Select::with_theme(&theme)
+        .with_prompt("选择要删除的规则（↑↓ 选择，回车确认）")
+        .items(&items)
+        .default(0)
+        .interact()?;
+
+    // 最后一项是取消
+    if selection == total {
         println!("已取消");
         return Ok(false);
     }
 
-    let index: usize = input.parse()
-        .map_err(|_| format!("无效序号: {}", input))?;
-
-    if index == 0 || index > total {
-        return Err(format!("序号 {} 超出范围（共 {} 条规则）", index, total).into());
-    }
-
-    if index <= config.forward.len() {
-        let removed = config.forward.remove(index - 1);
-        println!("已删除转发规则: #{} {} → {}", index, removed.listen, removed.to);
+    if selection < config.forward.len() {
+        let removed = config.forward.remove(selection);
+        println!("已删除: [转发] {} → {}", removed.listen, removed.to);
     } else {
-        let bi = index - config.forward.len() - 1;
+        let bi = selection - config.forward.len();
         let removed = config.block.remove(bi);
         let desc = removed.src.as_deref()
             .or(removed.dst.as_deref())
             .map(|s| s.to_string())
             .or(removed.port.map(|p| format!("port={}", p)))
             .unwrap_or_else(|| "block".to_string());
-        println!("已删除防火墙规则: #{} {}", index, desc);
+        println!("已删除: [防火墙] {}", desc);
     }
 
     Ok(true)
+}
+
+// ── 确认提示 ──────────────────────────────────────────────────────
+
+pub fn confirm(msg: &str, default: bool) -> bool {
+    Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt(msg)
+        .default(default)
+        .interact()
+        .unwrap_or(false)
 }
