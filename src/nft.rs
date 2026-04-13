@@ -104,12 +104,13 @@ fn append_forward(s: &mut String, r: &ResolvedForward) {
     let fam     = if is_ipv6 { "ip6" } else { "ip" };
     let addr_kw = if is_ipv6 { "ip6 daddr" } else { "ip daddr" };
 
-    // 速率限制：先插入 drop 规则，超速数据包直接丢弃
-    if let Some(rate) = &r.rule.rate_limit {
+    // 带宽限速：对该端口所有数据包计速，超速直接丢弃
+    if let Some(mbps) = r.rule.rate_limit {
+        let kbytes_per_sec = mbps * 1000 / 8;
         let sport = listen_range_expr(&r.listen);
         s.push_str(&format!(
-            "add rule {fam} {NAT_TABLE} PREROUTING ct state new {proto} dport {sport} \
-             limit rate over {rate} counter drop comment \"{cmt}\"\n"
+            "add rule {fam} {NAT_TABLE} PREROUTING {proto} dport {sport} \
+             limit rate over {kbytes_per_sec} kbytes/second counter drop comment \"{cmt}\"\n"
         ));
     }
 

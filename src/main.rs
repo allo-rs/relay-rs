@@ -60,7 +60,7 @@ enum Command {
     Del,
     /// 检查转发规则连通性
     Check,
-    /// 切换转发模式（kernel / userspace）
+    /// 切换转发模式（nat / relay）
     Mode,
     /// 查看各规则流量统计
     Stats,
@@ -195,8 +195,8 @@ fn run_daemon(config_path: &str, interval: u64) {
 
     let mode = config::load(config_path).map(|c| c.mode).unwrap_or_default();
     log::info!("relay-rs 启动，模式: {}", match mode {
-        config::ForwardMode::Kernel    => "kernel (nftables)",
-        config::ForwardMode::Userspace => "userspace (tokio)",
+        config::ForwardMode::Nat   => "nat (nftables)",
+        config::ForwardMode::Relay => "relay (tokio + splice)",
     });
 
     // 注册 SIGHUP 用于热重载，两种模式共用
@@ -213,20 +213,20 @@ fn run_daemon(config_path: &str, interval: u64) {
     }
 
     match mode {
-        config::ForwardMode::Kernel => {
+        config::ForwardMode::Nat => {
             enable_ip_forwarding();
             log::info!("配置: {}，最大轮询间隔: {}s", config_path, interval);
-            run_kernel_daemon(config_path, interval, reload);
+            run_nat_daemon(config_path, interval, reload);
         }
-        config::ForwardMode::Userspace => {
+        config::ForwardMode::Relay => {
             // 清理可能残留的 nftables 规则（从内核模式切换过来时）
             nft::clear_tables();
-            run_userspace_daemon(config_path, reload);
+            run_relay_daemon(config_path, reload);
         }
     }
 }
 
-fn run_kernel_daemon(config_path: &str, interval: u64, reload: Arc<AtomicBool>) {
+fn run_nat_daemon(config_path: &str, interval: u64, reload: Arc<AtomicBool>) {
     let mut last_script = String::new();
     let mut next_sleep  = interval.clamp(MIN_INTERVAL, MAX_INTERVAL);
 
@@ -249,7 +249,7 @@ fn run_kernel_daemon(config_path: &str, interval: u64, reload: Arc<AtomicBool>) 
     }
 }
 
-fn run_userspace_daemon(config_path: &str, reload: Arc<AtomicBool>) {
+fn run_relay_daemon(config_path: &str, reload: Arc<AtomicBool>) {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

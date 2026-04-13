@@ -35,8 +35,8 @@ pub fn list(config: &Config) {
             } else {
                 String::new()
             };
-            let rate_hint = r.rate_limit.as_deref()
-                .map(|rate| format!("  [rate: {}]", rate))
+            let rate_hint = r.rate_limit
+                .map(|mbps| format!("  [rate: {} Mbps]", mbps))
                 .unwrap_or_default();
             let cmt = r.comment.as_deref().map(|s| format!("  # {}", s)).unwrap_or_default();
             println!("  #{:<3} {}  →  {}{}{}{}{}", idx, r.listen, to_display, proto_hint, balance_hint, rate_hint, cmt);
@@ -212,11 +212,22 @@ fn add_forward(config: &mut Config, theme: &ColorfulTheme) -> Result<(), Box<dyn
         .default(0)
         .interact()?;
 
-    // 速率限制（可选）
-    let rate: String = Input::with_theme(theme)
-        .with_prompt("速率限制（可选，如 10 mbytes/second，回车跳过）")
+    // 带宽限速（可选）
+    let rate_str: String = Input::with_theme(theme)
+        .with_prompt("带宽限速 Mbps（可选，如 200，回车跳过）")
         .allow_empty(true)
         .interact_text()?;
+    let rate_limit: Option<u32> = if rate_str.is_empty() {
+        None
+    } else {
+        match rate_str.trim().parse::<u32>() {
+            Ok(v) => Some(v),
+            Err(_) => {
+                eprintln!("无效数字，跳过限速");
+                None
+            }
+        }
+    };
 
     let comment: String = Input::with_theme(theme)
         .with_prompt("备注（可选，直接回车跳过）")
@@ -229,7 +240,7 @@ fn add_forward(config: &mut Config, theme: &ColorfulTheme) -> Result<(), Box<dyn
         proto,
         ipv6: ip_ver == 1,
         balance,
-        rate_limit: if rate.is_empty() { None } else { Some(rate) },
+        rate_limit,
         comment: if comment.is_empty() { None } else { Some(comment) },
     });
 
@@ -449,32 +460,32 @@ pub fn mode_cmd(mut config: Config, config_path: &str) -> Result<bool, Box<dyn s
     let theme = ColorfulTheme::default();
 
     let current = match config.mode {
-        ForwardMode::Kernel    => 0usize,
-        ForwardMode::Userspace => 1,
+        ForwardMode::Nat   => 0usize,
+        ForwardMode::Relay => 1,
     };
 
     let idx = Select::with_theme(&theme)
         .with_prompt(format!(
             "转发模式（当前: {}）",
-            if current == 0 { "kernel" } else { "userspace" }
+            if current == 0 { "nat" } else { "relay" }
         ))
         .items(&[
-            "kernel     — nftables DNAT，内核直转，性能最优（推荐）",
-            "userspace  — tokio 异步代理，无需 root，支持复杂场景",
+            "nat    — nftables DNAT，内核直转，性能最优（推荐）",
+            "relay  — tokio + splice 零拷贝，无需 root，支持复杂场景",
         ])
         .default(current)
         .interact()?;
 
-    let new_mode = if idx == 0 { ForwardMode::Kernel } else { ForwardMode::Userspace };
+    let new_mode = if idx == 0 { ForwardMode::Nat } else { ForwardMode::Relay };
 
     if new_mode == config.mode {
-        println!("模式未变更（{}）", if idx == 0 { "kernel" } else { "userspace" });
+        println!("模式未变更（{}）", if idx == 0 { "nat" } else { "relay" });
         return Ok(false);
     }
 
     config.mode = new_mode;
     crate::config::save(&config, config_path)?;
-    println!("已切换 → {}", if idx == 0 { "kernel" } else { "userspace" });
+    println!("已切换 → {}", if idx == 0 { "nat" } else { "relay" });
     println!();
     Ok(true)
 }

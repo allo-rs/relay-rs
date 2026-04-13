@@ -48,9 +48,9 @@ pub struct ForwardRule {
     /// 多目标负载均衡策略（默认 round-robin）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub balance: Option<Balance>,
-    /// 速率限制，直接传给 nftables，如 "10 mbytes/second"
+    /// 带宽限速，单位 Mbps，如 200 表示 200 Mbps
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rate_limit: Option<String>,
+    pub rate_limit: Option<u32>,
     pub comment: Option<String>,
 }
 
@@ -78,15 +78,15 @@ pub struct BlockRule {
 pub enum ForwardMode {
     /// nftables DNAT，内核直转（默认）
     #[default]
-    Kernel,
-    /// tokio 异步代理，用户态转发
-    Userspace,
+    Nat,
+    /// tokio 异步代理 + splice 零拷贝
+    Relay,
 }
 
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct Config {
-    /// 转发模式（默认 kernel，kernel 时不写入配置文件）
-    #[serde(default, skip_serializing_if = "ForwardMode::is_kernel")]
+    /// 转发模式（默认 nat，nat 时不写入配置文件）
+    #[serde(default, skip_serializing_if = "ForwardMode::is_nat")]
     pub mode: ForwardMode,
     #[serde(default)]
     pub forward: Vec<ForwardRule>,
@@ -95,7 +95,7 @@ pub struct Config {
 }
 
 impl ForwardMode {
-    fn is_kernel(&self) -> bool { *self == ForwardMode::Kernel }
+    fn is_nat(&self) -> bool { *self == ForwardMode::Nat }
 }
 
 // ── 解析后的端口信息 ──────────────────────────────────────────────
