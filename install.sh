@@ -3,6 +3,9 @@ set -euo pipefail
 
 # ── 配置 ──────────────────────────────────────────────────────────
 REPO="allo-rs/relay-rs"
+# 国内访问 GitHub 慢时可设置代理，留空则直连
+# 例: GITHUB_PROXY="https://mirror.ghproxy.com/"
+GITHUB_PROXY="${GITHUB_PROXY:-https://mirror.ghproxy.com/}"
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/relay-rs"
 SERVICE_FILE="/etc/systemd/system/relay-rs.service"
@@ -36,7 +39,7 @@ LATEST=$(curl -fsSL --connect-timeout 10 --max-time 30 \
 info "最新版本: $LATEST"
 
 # ── 下载二进制 ────────────────────────────────────────────────────
-DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST}/${ARTIFACT}"
+DOWNLOAD_URL="${GITHUB_PROXY}https://github.com/${REPO}/releases/download/${LATEST}/${ARTIFACT}"
 TMP_BIN=$(mktemp)
 
 info "下载 $DOWNLOAD_URL ..."
