@@ -155,23 +155,43 @@ fn add_block(config: &mut Config) -> Result<(), Box<dyn std::error::Error>> {
 
 // ── rr del ────────────────────────────────────────────────────────
 
-pub fn del(config: &mut Config, index: usize) -> Result<(), Box<dyn std::error::Error>> {
+/// 返回 Ok(true) 表示已删除，Ok(false) 表示用户取消
+pub fn del(config: &mut Config) -> Result<bool, Box<dyn std::error::Error>> {
     let total = config.forward.len() + config.block.len();
+    if total == 0 {
+        println!("（暂无规则）");
+        return Ok(false);
+    }
+
+    list(config);
+    println!();
+
+    let input = prompt("请输入要删除的序号（回车取消）", "");
+    if input.is_empty() {
+        println!("已取消");
+        return Ok(false);
+    }
+
+    let index: usize = input.parse()
+        .map_err(|_| format!("无效序号: {}", input))?;
+
     if index == 0 || index > total {
         return Err(format!("序号 {} 超出范围（共 {} 条规则）", index, total).into());
     }
 
     if index <= config.forward.len() {
         let removed = config.forward.remove(index - 1);
-        println!("已删除转发规则: {} → {}", removed.listen, removed.to);
+        println!("已删除转发规则: #{} {} → {}", index, removed.listen, removed.to);
     } else {
         let bi = index - config.forward.len() - 1;
         let removed = config.block.remove(bi);
         let desc = removed.src.as_deref()
             .or(removed.dst.as_deref())
-            .unwrap_or("block rule");
-        println!("已删除防火墙规则: {}", desc);
+            .map(|s| s.to_string())
+            .or(removed.port.map(|p| format!("port={}", p)))
+            .unwrap_or_else(|| "block".to_string());
+        println!("已删除防火墙规则: #{} {}", index, desc);
     }
 
-    Ok(())
+    Ok(true)
 }

@@ -46,11 +46,8 @@ enum Command {
     List,
     /// 交互式添加规则
     Add,
-    /// 删除指定规则（按 rr list 显示的序号）
-    Del {
-        /// 规则序号
-        index: usize,
-    },
+    /// 交互式删除规则
+    Del,
 }
 
 fn main() {
@@ -94,16 +91,15 @@ fn run_ctl(cmd: Command, config: &str) {
                 Err(e) => { eprintln!("错误: {}", e); std::process::exit(1); }
             }
         }
-        Command::Del { index } => {
+        Command::Del => {
             let mut cfg = match config::load(config) {
                 Ok(c) => c,
                 Err(e) => { eprintln!("{}", e); std::process::exit(1); }
             };
-            ctl::list(&cfg);
-            println!();
-            match ctl::del(&mut cfg, index) {
-                Ok(_) => match config::save(&cfg, config) {
+            match ctl::del(&mut cfg) {
+                Ok(true) => match config::save(&cfg, config) {
                     Ok(_) => {
+                        println!();
                         ctl::list(&cfg);
                         println!();
                         if ctl::confirm("立即重启服务使规则生效？[Y/n]", true) {
@@ -112,6 +108,7 @@ fn run_ctl(cmd: Command, config: &str) {
                     }
                     Err(e) => { eprintln!("保存失败: {}", e); std::process::exit(1); }
                 },
+                Ok(false) => {}
                 Err(e) => { eprintln!("错误: {}", e); std::process::exit(1); }
             }
         }
