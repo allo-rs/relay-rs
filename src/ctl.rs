@@ -88,11 +88,6 @@ fn add_forward(config: &mut Config, theme: &ColorfulTheme) -> Result<(), Box<dyn
         _ => Proto::All,
     };
 
-    let ipv6 = Confirm::with_theme(theme)
-        .with_prompt("强制使用 IPv6")
-        .default(false)
-        .interact()?;
-
     let comment: String = Input::with_theme(theme)
         .with_prompt("备注（可选，直接回车跳过）")
         .allow_empty(true)
@@ -102,7 +97,7 @@ fn add_forward(config: &mut Config, theme: &ColorfulTheme) -> Result<(), Box<dyn
         listen,
         to,
         proto,
-        ipv6,
+        ipv6: false,
         comment: if comment.is_empty() { None } else { Some(comment) },
     });
 
@@ -152,11 +147,6 @@ fn add_block(config: &mut Config, theme: &ColorfulTheme) -> Result<(), Box<dyn s
         .default(0)
         .interact()?;
 
-    let ipv6 = Confirm::with_theme(theme)
-        .with_prompt("匹配 IPv6")
-        .default(false)
-        .interact()?;
-
     let comment: String = Input::with_theme(theme)
         .with_prompt("备注（可选）")
         .allow_empty(true)
@@ -168,7 +158,7 @@ fn add_block(config: &mut Config, theme: &ColorfulTheme) -> Result<(), Box<dyn s
         port,
         proto,
         chain: if chain_idx == 1 { Chain::Forward } else { Chain::Input },
-        ipv6,
+        ipv6: false,
         comment: if comment.is_empty() { None } else { Some(comment) },
     });
 
