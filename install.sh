@@ -79,7 +79,7 @@ Description=relay-rs NAT forwarding daemon
 After=network.target
 
 [Service]
-ExecStart=${INSTALL_DIR}/${BINARY_NAME} --config ${CONFIG_DIR}/relay.toml
+ExecStart=${INSTALL_DIR}/${BINARY_NAME} daemon --config ${CONFIG_DIR}/relay.toml
 Restart=on-failure
 RestartSec=5
 

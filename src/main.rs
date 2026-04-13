@@ -3,7 +3,7 @@ mod ctl;
 mod ip;
 mod nft;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use nft::ResolvedForward;
 use std::thread::sleep;
 use std::time::Duration;
@@ -50,19 +50,27 @@ enum Command {
     Del,
     /// 查看各规则流量统计
     Stats,
+    /// 以守护进程模式运行（供 systemd 调用）
+    #[command(hide = true)]
+    Daemon,
 }
 
 fn main() {
     let cli = Cli::parse();
     match cli.command {
-        Some(cmd) => run_ctl(cmd, &cli.config),
-        None => run_daemon(&cli.config, cli.interval),
+        Some(cmd) => run_ctl(cmd, &cli.config, cli.interval),
+        None => {
+            // 无子命令时打印帮助，避免误触守护进程模式覆盖 nftables 规则
+            let mut cmd = Cli::command();
+            cmd.print_help().unwrap();
+            println!();
+        }
     }
 }
 
 // ── 管理子命令 ────────────────────────────────────────────────────
 
-fn run_ctl(cmd: Command, config: &str) {
+fn run_ctl(cmd: Command, config: &str, interval: u64) {
     match cmd {
         Command::Start   => systemctl("start"),
         Command::Stop    => systemctl("stop"),
@@ -72,6 +80,7 @@ fn run_ctl(cmd: Command, config: &str) {
         Command::Config  => edit_config(config),
         Command::Reload  => { edit_config(config); systemctl("restart"); }
         Command::Stats   => ctl::stats(),
+        Command::Daemon  => run_daemon(config, interval),
         Command::List    => {
             match config::load(config) {
                 Ok(cfg) => ctl::list(&cfg),
