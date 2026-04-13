@@ -68,7 +68,6 @@ if [[ ! -f "${CONFIG_DIR}/relay.toml" ]]; then
 # src = "1.2.3.4"         # 封禁来源 IP
 EOF
   info "已创建配置文件模板: ${CONFIG_DIR}/relay.toml"
-  warn "请编辑配置文件后启动服务: vim ${CONFIG_DIR}/relay.toml"
 else
   warn "配置文件已存在，跳过创建: ${CONFIG_DIR}/relay.toml"
 fi
