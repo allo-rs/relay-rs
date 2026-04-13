@@ -2,41 +2,47 @@ mod config;
 mod ip;
 mod nft;
 
+use clap::Parser;
 use std::thread::sleep;
 use std::time::Duration;
 
-const CONFIG_PATH: &str = "/etc/relay-rs/relay.toml";
-/// 轮询间隔（秒）；可通过环境变量 RELAY_INTERVAL 覆盖
-const DEFAULT_INTERVAL: u64 = 60;
+#[derive(Parser)]
+#[command(name = "relay-rs", about = "基于 nftables 的 NAT 端口转发守护进程", version)]
+struct Args {
+    /// 配置文件路径
+    #[arg(short, long, default_value = "/etc/relay-rs/relay.toml")]
+    config: String,
+
+    /// 轮询间隔（秒）
+    #[arg(short, long, default_value_t = 60)]
+    interval: u64,
+}
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
+    let args = Args::parse();
+
     // 开启内核 IP 转发
     enable_ip_forwarding();
 
-    let interval = std::env::var("RELAY_INTERVAL")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_INTERVAL);
-
-    log::info!("relay-rs 启动，配置文件: {}，轮询间隔: {}s", CONFIG_PATH, interval);
+    log::info!("relay-rs 启动，配置文件: {}，轮询间隔: {}s", args.config, args.interval);
 
     let mut last_script = String::new();
 
     loop {
-        match tick(&mut last_script) {
+        match tick(&mut last_script, &args.config) {
             Ok(true) => log::info!("规则已更新并应用"),
             Ok(false) => log::debug!("规则无变化，跳过"),
             Err(e) => log::error!("{}", e),
         }
-        sleep(Duration::from_secs(interval));
+        sleep(Duration::from_secs(args.interval));
     }
 }
 
 /// 执行一次轮询：加载配置 → 解析 IP → 比对脚本 → 按需应用
-fn tick(last_script: &mut String) -> Result<bool, Box<dyn std::error::Error>> {
-    let config = config::load(CONFIG_PATH)?;
+fn tick(last_script: &mut String, config_path: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    let config = config::load(config_path)?;
 
     if config.rules.is_empty() {
         log::warn!("配置中没有任何规则");
