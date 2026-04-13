@@ -1,5 +1,10 @@
-use crate::config::{BlockRule, Chain, Config, ForwardRule, Proto};
+use std::net::TcpStream;
+use std::time::Duration;
+
 use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
+
+use crate::config::{Balance, BlockRule, Chain, Config, ForwardRule, Proto};
+use crate::ip;
 
 // ── rr list ───────────────────────────────────────────────────────
 
@@ -15,13 +20,26 @@ pub fn list(config: &Config) {
     if !config.forward.is_empty() {
         println!("转发规则:");
         for r in &config.forward {
-            let proto = match r.proto {
+            let proto_hint = match r.proto {
                 Proto::All => String::new(),
                 Proto::Tcp => "  tcp".to_string(),
                 Proto::Udp => "  udp".to_string(),
             };
+            let to_display = r.to.join(", ");
+            let balance_hint = if r.to.len() > 1 {
+                let b = match r.balance.as_ref().unwrap_or(&Balance::RoundRobin) {
+                    Balance::RoundRobin => "round-robin",
+                    Balance::Random     => "random",
+                };
+                format!("  [{}]", b)
+            } else {
+                String::new()
+            };
+            let rate_hint = r.rate_limit.as_deref()
+                .map(|rate| format!("  [rate: {}]", rate))
+                .unwrap_or_default();
             let cmt = r.comment.as_deref().map(|s| format!("  # {}", s)).unwrap_or_default();
-            println!("  #{:<3} {}  →  {}{}{}", idx, r.listen, r.to, proto, cmt);
+            println!("  #{:<3} {}  →  {}{}{}{}{}", idx, r.listen, to_display, proto_hint, balance_hint, rate_hint, cmt);
             idx += 1;
         }
     }
@@ -39,14 +57,89 @@ pub fn list(config: &Config) {
                     Proto::Tcp => "tcp", Proto::Udp => "udp", Proto::All => "all",
                 }));
             }
-            let chain = match b.chain {
-                Chain::Input => String::new(),
-                Chain::Forward => "  forward".to_string(),
-            };
+            let chain = match b.chain { Chain::Input => String::new(), Chain::Forward => "  forward".to_string() };
             let cmt = b.comment.as_deref().map(|s| format!("  # {}", s)).unwrap_or_default();
             println!("  #{:<3} {}{}{}", idx, parts.join("  "), chain, cmt);
             idx += 1;
         }
+    }
+}
+
+// ── rr check ─────────────────────────────────────────────────────
+
+pub fn check(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
+    if config.forward.is_empty() {
+        println!("（暂无转发规则）");
+        return Ok(());
+    }
+
+    let theme = ColorfulTheme::default();
+
+    // 构建选项，首项为「检查全部」
+    let mut items: Vec<String> = vec!["检查全部规则".to_string()];
+    for r in &config.forward {
+        let to_display = r.to.join(", ");
+        let cmt = r.comment.as_deref().map(|s| format!(" # {}", s)).unwrap_or_default();
+        items.push(format!("{}  →  {}{}", r.listen, to_display, cmt));
+    }
+
+    let selection = Select::with_theme(&theme)
+        .with_prompt("选择要检查的规则（↑↓ 选择，回车确认）")
+        .items(&items)
+        .default(0)
+        .interact()?;
+
+    println!();
+
+    let rules_to_check: Vec<&ForwardRule> = if selection == 0 {
+        config.forward.iter().collect()
+    } else {
+        vec![&config.forward[selection - 1]]
+    };
+
+    for rule in rules_to_check {
+        let label = rule.comment.as_deref().unwrap_or(&rule.listen);
+        println!("[ {} ]", label);
+
+        for to_str in &rule.to {
+            probe_target(to_str, rule.ipv6, &rule.proto);
+        }
+        println!();
+    }
+
+    Ok(())
+}
+
+fn probe_target(to_str: &str, ipv6: bool, proto: &Proto) {
+    let target = match crate::config::Target::parse(to_str) {
+        Ok(t) => t,
+        Err(e) => { println!("  ✗  {} — 解析失败: {}", to_str, e); return; }
+    };
+
+    // DNS 解析
+    let ip = match ip::resolve(&target.host, ipv6) {
+        Ok(ip) => ip,
+        Err(e) => { println!("  ✗  {} — DNS 失败: {}", to_str, e); return; }
+    };
+
+    // UDP 规则无法 TCP 探测
+    if matches!(proto, Proto::Udp) {
+        println!("  ?  {}  (→ {})  UDP 规则跳过 TCP 探测", to_str, ip);
+        return;
+    }
+
+    let addr_str = if ip.contains(':') {
+        format!("[{}]:{}", ip, target.port_start)
+    } else {
+        format!("{}:{}", ip, target.port_start)
+    };
+
+    match addr_str.parse::<std::net::SocketAddr>() {
+        Ok(addr) => match TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
+            Ok(_)  => println!("  ✓  {}  (→ {})", to_str, ip),
+            Err(e) => println!("  ✗  {}  (→ {})  {}", to_str, ip, e),
+        },
+        Err(e) => println!("  ✗  {} — 地址解析失败: {}", to_str, e),
     }
 }
 
@@ -72,9 +165,35 @@ fn add_forward(config: &mut Config, theme: &ColorfulTheme) -> Result<(), Box<dyn
         .with_prompt("本机端口（单端口 10000 或端口段 10000-10100）")
         .interact_text()?;
 
-    let to: String = Input::with_theme(theme)
+    // 第一个目标
+    let first: String = Input::with_theme(theme)
         .with_prompt("目标地址（host:port）")
         .interact_text()?;
+    let mut to_list = vec![first];
+
+    // 追加更多目标（负载均衡）
+    while Confirm::with_theme(theme)
+        .with_prompt("继续添加目标（负载均衡）？")
+        .default(false)
+        .interact()?
+    {
+        let extra: String = Input::with_theme(theme)
+            .with_prompt("额外目标地址（host:port）")
+            .interact_text()?;
+        to_list.push(extra);
+    }
+
+    // 多目标：询问负载均衡策略
+    let balance = if to_list.len() > 1 {
+        let idx = Select::with_theme(theme)
+            .with_prompt("负载均衡策略")
+            .items(&["round-robin（轮询，默认）", "random（随机）"])
+            .default(0)
+            .interact()?;
+        Some(if idx == 1 { Balance::Random } else { Balance::RoundRobin })
+    } else {
+        None
+    };
 
     let proto_idx = Select::with_theme(theme)
         .with_prompt("协议")
@@ -82,17 +201,19 @@ fn add_forward(config: &mut Config, theme: &ColorfulTheme) -> Result<(), Box<dyn
         .default(0)
         .interact()?;
 
-    let proto = match proto_idx {
-        1 => Proto::Tcp,
-        2 => Proto::Udp,
-        _ => Proto::All,
-    };
+    let proto = match proto_idx { 1 => Proto::Tcp, 2 => Proto::Udp, _ => Proto::All };
 
     let ip_ver = Select::with_theme(theme)
         .with_prompt("目标域名解析方式")
         .items(&["IPv4（默认）", "IPv6"])
         .default(0)
         .interact()?;
+
+    // 速率限制（可选）
+    let rate: String = Input::with_theme(theme)
+        .with_prompt("速率限制（可选，如 10 mbytes/second，回车跳过）")
+        .allow_empty(true)
+        .interact_text()?;
 
     let comment: String = Input::with_theme(theme)
         .with_prompt("备注（可选，直接回车跳过）")
@@ -101,9 +222,11 @@ fn add_forward(config: &mut Config, theme: &ColorfulTheme) -> Result<(), Box<dyn
 
     config.forward.push(ForwardRule {
         listen,
-        to,
+        to: to_list,
         proto,
         ipv6: ip_ver == 1,
+        balance,
+        rate_limit: if rate.is_empty() { None } else { Some(rate) },
         comment: if comment.is_empty() { None } else { Some(comment) },
     });
 
@@ -127,9 +250,8 @@ fn add_block(config: &mut Config, theme: &ColorfulTheme) -> Result<(), Box<dyn s
         .interact_text()?;
 
     let port = port.parse::<u16>().ok();
-
-    let src = if src.is_empty() { None } else { Some(src) };
-    let dst = if dst.is_empty() { None } else { Some(dst) };
+    let src  = if src.is_empty() { None } else { Some(src) };
+    let dst  = if dst.is_empty() { None } else { Some(dst) };
 
     if src.is_none() && dst.is_none() && port.is_none() {
         return Err("src / dst / port 至少填一项".into());
@@ -141,11 +263,7 @@ fn add_block(config: &mut Config, theme: &ColorfulTheme) -> Result<(), Box<dyn s
         .default(0)
         .interact()?;
 
-    let proto = match proto_idx {
-        1 => Proto::Tcp,
-        2 => Proto::Udp,
-        _ => Proto::All,
-    };
+    let proto = match proto_idx { 1 => Proto::Tcp, 2 => Proto::Udp, _ => Proto::All };
 
     let chain_idx = Select::with_theme(theme)
         .with_prompt("作用链")
@@ -159,10 +277,7 @@ fn add_block(config: &mut Config, theme: &ColorfulTheme) -> Result<(), Box<dyn s
         .interact_text()?;
 
     config.block.push(BlockRule {
-        src,
-        dst,
-        port,
-        proto,
+        src, dst, port, proto,
         chain: if chain_idx == 1 { Chain::Forward } else { Chain::Input },
         ipv6: false,
         comment: if comment.is_empty() { None } else { Some(comment) },
@@ -181,11 +296,11 @@ pub fn del(config: &mut Config) -> Result<bool, Box<dyn std::error::Error>> {
         return Ok(false);
     }
 
-    // 构建选项列表
     let mut items: Vec<String> = Vec::new();
     for r in &config.forward {
+        let to_display = r.to.join(", ");
         let cmt = r.comment.as_deref().map(|s| format!(" # {}", s)).unwrap_or_default();
-        items.push(format!("[转发] {}  →  {}{}", r.listen, r.to, cmt));
+        items.push(format!("[转发] {}  →  {}{}", r.listen, to_display, cmt));
     }
     for b in &config.block {
         let mut parts = Vec::new();
@@ -204,7 +319,6 @@ pub fn del(config: &mut Config) -> Result<bool, Box<dyn std::error::Error>> {
         .default(0)
         .interact()?;
 
-    // 最后一项是取消
     if selection == total {
         println!("已取消");
         return Ok(false);
@@ -212,7 +326,8 @@ pub fn del(config: &mut Config) -> Result<bool, Box<dyn std::error::Error>> {
 
     if selection < config.forward.len() {
         let removed = config.forward.remove(selection);
-        println!("已删除: [转发] {} → {}", removed.listen, removed.to);
+        let to_display = removed.to.join(", ");
+        println!("已删除: [转发] {} → {}", removed.listen, to_display);
     } else {
         let bi = selection - config.forward.len();
         let removed = config.block.remove(bi);
@@ -240,7 +355,7 @@ pub fn stats() {
         if !out.status.success() { continue }
 
         let text = String::from_utf8_lossy(&out.stdout);
-        let entries = parse_counters(&text, family);
+        let entries = parse_counters(&text);
         if entries.is_empty() { continue }
 
         if !found {
@@ -265,14 +380,9 @@ pub fn stats() {
     }
 }
 
-struct CounterEntry {
-    comment: String,
-    packets: u64,
-    bytes:   u64,
-}
+struct CounterEntry { comment: String, packets: u64, bytes: u64 }
 
-/// 从 nft list table 输出中提取 PREROUTING 链的计数器
-fn parse_counters(text: &str, _family: &str) -> Vec<CounterEntry> {
+fn parse_counters(text: &str) -> Vec<CounterEntry> {
     let mut in_prerouting = false;
     let mut entries = Vec::new();
 
@@ -283,11 +393,11 @@ fn parse_counters(text: &str, _family: &str) -> Vec<CounterEntry> {
         if !in_prerouting { continue; }
         if !trimmed.contains("counter packets") { continue; }
 
-        let packets = extract_u64(trimmed, "packets");
-        let bytes   = extract_u64(trimmed, "bytes");
-        let comment = extract_comment(trimmed);
-
-        entries.push(CounterEntry { comment, packets, bytes });
+        entries.push(CounterEntry {
+            packets: extract_u64(trimmed, "packets"),
+            bytes:   extract_u64(trimmed, "bytes"),
+            comment: extract_comment(trimmed),
+        });
     }
 
     entries
@@ -304,11 +414,8 @@ fn extract_u64(s: &str, keyword: &str) -> u64 {
 fn extract_comment(s: &str) -> String {
     if let Some(start) = s.find("comment \"") {
         let rest = &s[start + 9..];
-        if let Some(end) = rest.find('"') {
-            return rest[..end].to_string();
-        }
+        if let Some(end) = rest.find('"') { return rest[..end].to_string(); }
     }
-    // 没有 comment 则取 dnat 目标
     if let Some(idx) = s.find("dnat to ") {
         return s[idx..].split_whitespace().take(3).collect::<Vec<_>>().join(" ");
     }
@@ -316,7 +423,6 @@ fn extract_comment(s: &str) -> String {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    // 简单按字节截断（中文字符占 3 字节，视觉上会短一些，够用）
     if s.len() <= max { s.to_string() } else { format!("{}…", &s[..max - 3]) }
 }
 
@@ -327,9 +433,9 @@ fn format_packets(n: u64) -> String {
 }
 
 fn format_bytes(b: u64) -> String {
-    if b >= 1 << 30 { format!("{:.2} GB", b as f64 / (1 << 30) as f64) }
-    else if b >= 1 << 20 { format!("{:.2} MB", b as f64 / (1 << 20) as f64) }
-    else if b >= 1 << 10 { format!("{:.2} KB", b as f64 / (1 << 10) as f64) }
+    if b >= 1 << 30 { format!("{:.2} GB", b as f64 / (1u64 << 30) as f64) }
+    else if b >= 1 << 20 { format!("{:.2} MB", b as f64 / (1u64 << 20) as f64) }
+    else if b >= 1 << 10 { format!("{:.2} KB", b as f64 / (1u64 << 10) as f64) }
     else { format!("{} B", b) }
 }
 
