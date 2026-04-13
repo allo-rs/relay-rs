@@ -236,6 +236,20 @@ fn append_block(s: &mut String, b: &BlockRule) {
     ));
 }
 
+// ── 清理残留规则（切换到用户态模式时调用） ────────────────────────
+
+pub fn clear_tables() {
+    for fam in ["ip", "ip6"] {
+        for table in [NAT_TABLE, FILTER_TABLE] {
+            std::process::Command::new(NFT_BIN)
+                .args(["delete", "table", fam, table])
+                .output()
+                .ok(); // 表不存在时忽略错误
+        }
+    }
+    log::info!("已清理 nftables 规则表");
+}
+
 // ── 工具函数 ──────────────────────────────────────────────────────
 
 fn proto_expr(proto: &Proto) -> &'static str {
