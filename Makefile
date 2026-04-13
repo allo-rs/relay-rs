@@ -15,15 +15,15 @@ build:
 release:
 	@echo "当前版本: $(CURRENT)"
 	@echo ""
-	@echo "  x) patch  →  $(NEXT_PATCH)"
-	@echo "  y) minor  →  $(NEXT_MINOR)"
-	@echo "  z) major  →  $(NEXT_MAJOR)"
+	@echo "  1) patch  →  $(NEXT_PATCH)"
+	@echo "  2) minor  →  $(NEXT_MINOR)"
+	@echo "  3) major  →  $(NEXT_MAJOR)"
 	@echo ""
-	@read -p "选择 [x/y/z]: " choice; \
+	@read -p "选择 [1/2/3]: " choice; \
 	case "$$choice" in \
-		x) $(MAKE) _do_release NEXT=$(NEXT_PATCH) ;; \
-		y) $(MAKE) _do_release NEXT=$(NEXT_MINOR) ;; \
-		z) $(MAKE) _do_release NEXT=$(NEXT_MAJOR) ;; \
+		1) $(MAKE) _do_release NEXT=$(NEXT_PATCH) ;; \
+		2) $(MAKE) _do_release NEXT=$(NEXT_MINOR) ;; \
+		3) $(MAKE) _do_release NEXT=$(NEXT_MAJOR) ;; \
 		*) echo "已取消" ;; \
 	esac
 
