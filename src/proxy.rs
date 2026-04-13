@@ -3,6 +3,16 @@
 /// Linux：使用 splice(2) 零拷贝转发，数据在内核 pipe buffer ↔ socket buffer 间移动，
 ///        不经过 userspace 内存。
 /// 其他平台：回退到 tokio::io::copy_bidirectional（userspace 8KB 缓冲区）。
+///
+/// 特性：
+///   - TCP 转发（单端口 + 端口段）
+///   - UDP 中继（单端口 + 端口段）
+///   - splice 零拷贝（Linux）
+///   - Block 规则（精确 IP 匹配，拒绝连接）
+///   - 速率限制（令牌桶，新连接时检查）
+///   - Stats 统计（bytes_in/out/connections，写入 /tmp/relay-rs.stats）
+///   - DNS TTL 缓存（60s，失败时失效）
+///   - 健康检查后台任务（每 30s，TCP 探测，失败时失效 DNS 缓存）
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -16,6 +26,8 @@ use tokio::task::JoinSet;
 use tokio::time::timeout;
 
 use crate::config::{Balance, ForwardRule, Listen, Proto};
+use crate::dns_cache::DnsCache;
+use crate::relay_state::{RelayState, SharedState, TokenBucket};
 
 static RR_CTR: AtomicUsize = AtomicUsize::new(0);
 
@@ -37,11 +49,30 @@ pub async fn run(config_path: &str, reload: Arc<AtomicBool>) {
             }
         };
 
-        if !cfg.block.is_empty() {
-            log::warn!("用户态模式不支持 block 规则（已忽略），如需封禁 IP 请配置系统防火墙");
+        // 初始化 RelayState（block 规则 + 限速令牌桶）
+        let state = RelayState::new(cfg.block.clone());
+        {
+            let mut limiters = state.limiters.lock().unwrap();
+            for rule in &cfg.forward {
+                if let Some(mbps) = rule.rate_limit {
+                    limiters.insert(rule.listen.clone(), TokenBucket::new(mbps));
+                }
+            }
         }
 
+        // 初始化 DNS 缓存
+        let dns_cache = DnsCache::new();
+
         let mut set: JoinSet<()> = JoinSet::new();
+
+        // 健康检查后台任务（每 30s，TCP 探测，失败时失效 DNS 缓存）
+        {
+            let rules = cfg.forward.clone();
+            let cache = dns_cache.clone();
+            set.spawn(async move {
+                health_check_loop(rules, cache).await;
+            });
+        }
 
         for rule in cfg.forward {
             let listen = match crate::config::Listen::parse(&rule.listen) {
@@ -56,7 +87,9 @@ pub async fn run(config_path: &str, reload: Arc<AtomicBool>) {
             if need_tcp {
                 let rule_clone = rule.clone();
                 let listen_clone = listen.clone();
-                set.spawn(listen_rule(rule_clone, listen_clone));
+                let state_clone = Arc::clone(&state);
+                let cache_clone = dns_cache.clone();
+                set.spawn(listen_rule(rule_clone, listen_clone, state_clone, cache_clone));
             }
 
             if need_udp {
@@ -64,14 +97,16 @@ pub async fn run(config_path: &str, reload: Arc<AtomicBool>) {
                     Listen::Single(port) => {
                         let p = *port;
                         let rule_clone = rule.clone();
-                        set.spawn(listen_udp_rule(rule_clone, p, 0));
+                        let cache_clone = dns_cache.clone();
+                        set.spawn(listen_udp_rule(rule_clone, p, 0, cache_clone));
                     }
                     Listen::Range(start, end) => {
                         for i in 0..=(*end - *start) {
                             let port = start + i;
                             let rule_clone = rule.clone();
                             let offset = i;
-                            set.spawn(listen_udp_rule(rule_clone, port, offset));
+                            let cache_clone = dns_cache.clone();
+                            set.spawn(listen_udp_rule(rule_clone, port, offset, cache_clone));
                         }
                     }
                 }
@@ -91,10 +126,10 @@ pub async fn run(config_path: &str, reload: Arc<AtomicBool>) {
 
 // ── 单规则 TCP 监听（支持端口段） ─────────────────────────────────
 
-async fn listen_rule(rule: ForwardRule, listen: Listen) {
+async fn listen_rule(rule: ForwardRule, listen: Listen, state: SharedState, dns_cache: DnsCache) {
     match listen {
         Listen::Single(port) => {
-            listen_single_tcp(rule, port, 0).await;
+            listen_single_tcp(rule, port, 0, state, dns_cache).await;
         }
         Listen::Range(start, end) => {
             let mut set: JoinSet<()> = JoinSet::new();
@@ -102,8 +137,10 @@ async fn listen_rule(rule: ForwardRule, listen: Listen) {
                 let port = start + i;
                 let offset = i;
                 let rule = rule.clone();
+                let state = Arc::clone(&state);
+                let cache = dns_cache.clone();
                 set.spawn(async move {
-                    listen_single_tcp(rule, port, offset).await;
+                    listen_single_tcp(rule, port, offset, state, cache).await;
                 });
             }
             // 等待所有子任务结束（通常不会结束，除非被 abort）
@@ -113,7 +150,13 @@ async fn listen_rule(rule: ForwardRule, listen: Listen) {
 }
 
 /// 在单个端口上监听 TCP 连接，port_offset 用于端口段的目标端口偏移
-async fn listen_single_tcp(rule: ForwardRule, port: u16, port_offset: u16) {
+async fn listen_single_tcp(
+    rule: ForwardRule,
+    port: u16,
+    port_offset: u16,
+    state: SharedState,
+    dns_cache: DnsCache,
+) {
     let bind = format!("0.0.0.0:{}", port);
 
     let listener = match TcpListener::bind(&bind).await {
@@ -132,7 +175,9 @@ async fn listen_single_tcp(rule: ForwardRule, port: u16, port_offset: u16) {
         match listener.accept().await {
             Ok((client, peer)) => {
                 let rule = rule.clone();
-                tokio::spawn(relay(client, peer, rule, port_offset));
+                let state = Arc::clone(&state);
+                let cache = dns_cache.clone();
+                tokio::spawn(relay(client, peer, rule, port_offset, state, cache));
             }
             Err(e) => {
                 log::error!("TCP accept 失败 {}: {}", bind, e);
@@ -145,7 +190,7 @@ async fn listen_single_tcp(rule: ForwardRule, port: u16, port_offset: u16) {
 // ── UDP 中继 ──────────────────────────────────────────────────────
 
 /// 在单个端口上监听 UDP 数据报并中继到目标，port_offset 用于端口段的目标端口偏移
-async fn listen_udp_rule(rule: ForwardRule, port: u16, port_offset: u16) {
+async fn listen_udp_rule(rule: ForwardRule, port: u16, port_offset: u16, dns_cache: DnsCache) {
     let bind = format!("0.0.0.0:{}", port);
 
     let local_sock = match UdpSocket::bind(&bind).await {
@@ -185,23 +230,11 @@ async fn listen_udp_rule(rule: ForwardRule, port: u16, port_offset: u16) {
 
         // 端口段偏移
         let target_port = target.port_start.saturating_add(port_offset);
-        let lookup_str = format!("{}:{}", target.host, target_port);
 
-        let addrs: Vec<SocketAddr> = match tokio::net::lookup_host(&lookup_str).await {
-            Ok(iter) => iter.collect(),
-            Err(e) => { log::warn!("DNS 解析 {} 失败: {}", lookup_str, e); continue; }
-        };
-
-        let target_addr = if rule.ipv6 {
-            addrs.iter().find(|a| a.is_ipv6()).copied()
-        } else {
-            addrs.iter().find(|a| a.is_ipv4()).copied()
-                .or_else(|| addrs.iter().find(|a| a.is_ipv6()).copied())
-        };
-
-        let target_addr = match target_addr {
-            Some(a) => a,
-            None => { log::warn!("UDP 无法解析 {}", lookup_str); continue; }
+        // 使用 DNS 缓存解析目标地址
+        let target_addr = match dns_cache.resolve(&target.host, target_port, rule.ipv6).await {
+            Ok(a) => a,
+            Err(e) => { log::warn!("UDP DNS 解析 {}:{} 失败: {}", target.host, target_port, e); continue; }
         };
 
         // 查找或创建 per-client 的出站 UdpSocket
@@ -265,7 +298,39 @@ async fn listen_udp_rule(rule: ForwardRule, port: u16, port_offset: u16) {
 
 // ── 单连接 TCP 转发 ───────────────────────────────────────────────
 
-async fn relay(mut client: TcpStream, peer: SocketAddr, rule: ForwardRule, port_offset: u16) {
+async fn relay(
+    mut client: TcpStream,
+    peer: SocketAddr,
+    rule: ForwardRule,
+    port_offset: u16,
+    state: SharedState,
+    dns_cache: DnsCache,
+) {
+    // Block 规则检查（精确 IP 匹配）
+    let peer_ip = peer.ip();
+    let blocked = state.block_rules.iter().any(|b| {
+        b.src
+            .as_deref()
+            .map(|s| s == peer_ip.to_string())
+            .unwrap_or(false)
+    });
+    if blocked {
+        log::debug!("拦截来自 {} 的连接（block 规则）", peer);
+        return;
+    }
+
+    // 速率限制：每次新连接消耗固定 token（64KB 作为基准单位）
+    let key = rule.listen.clone();
+    {
+        let mut limiters = state.limiters.lock().unwrap();
+        if let Some(bucket) = limiters.get_mut(&key) {
+            if !bucket.consume(65536) {
+                log::debug!("限速拦截来自 {} 的连接（规则 {}）", peer, key);
+                return;
+            }
+        }
+    }
+
     let to_str = pick_target(&rule.to, &rule.balance);
     if to_str.is_empty() { return; }
 
@@ -276,37 +341,47 @@ async fn relay(mut client: TcpStream, peer: SocketAddr, rule: ForwardRule, port_
 
     // 端口段偏移
     let target_port = target.port_start.saturating_add(port_offset);
-    let lookup_str = format!("{}:{}", target.host, target_port);
-    let addrs: Vec<SocketAddr> = match tokio::net::lookup_host(&lookup_str).await {
-        Ok(iter) => iter.collect(),
-        Err(e) => { log::warn!("DNS 解析 {} 失败: {}", lookup_str, e); return; }
-    };
 
-    let resolved = if rule.ipv6 {
-        addrs.iter().find(|a| a.is_ipv6()).copied()
-    } else {
-        addrs.iter().find(|a| a.is_ipv4()).copied()
-            .or_else(|| addrs.iter().find(|a| a.is_ipv6()).copied())
-    };
-
-    let target_addr = match resolved {
-        Some(a) => a,
-        None => { log::warn!("无法解析 {}", lookup_str); return; }
+    // 使用 DNS 缓存解析目标地址
+    let target_addr = match dns_cache.resolve(&target.host, target_port, rule.ipv6).await {
+        Ok(a) => a,
+        Err(e) => { log::warn!("DNS 解析 {}:{} 失败: {}", target.host, target_port, e); return; }
     };
 
     let mut server = match TcpStream::connect(target_addr).await {
         Ok(s) => s,
-        Err(e) => { log::warn!("连接 {} ({}) 失败: {}", to_str, target_addr, e); return; }
+        Err(e) => {
+            // 连接失败时使 DNS 缓存失效，下次重新解析
+            dns_cache.invalidate(&target.host, target_port, rule.ipv6);
+            log::warn!("连接 {} ({}) 失败: {}", to_str, target_addr, e);
+            return;
+        }
     };
 
     let result = do_relay(&mut client, &mut server).await;
 
-    match result {
-        Ok((c2s, s2c)) => log::debug!(
-            "{} ↔ {}  ↑{} ↓{}", peer, to_str, fmt_bytes(c2s), fmt_bytes(s2c)
-        ),
-        Err(e) => log::debug!("{} 断开: {}", peer, e),
+    // 更新统计（bytes_in/out/connections，写入 /tmp/relay-rs.stats）
+    let (c2s, s2c) = match result {
+        Ok((c2s, s2c)) => {
+            log::debug!("{} ↔ {}  ↑{} ↓{}", peer, to_str, fmt_bytes(c2s), fmt_bytes(s2c));
+            (c2s, s2c)
+        }
+        Err(e) => {
+            log::debug!("{} 断开: {}", peer, e);
+            (0, 0)
+        }
+    };
+
+    match state.stats.lock() {
+        Ok(mut map) => {
+            let s = map.entry(key).or_default();
+            s.total_conns += 1;
+            s.bytes_in += c2s;
+            s.bytes_out += s2c;
+        }
+        Err(e) => log::warn!("统计锁获取失败: {}", e),
     }
+    state.flush_to_file();
 }
 
 // ── 转发策略分发 ──────────────────────────────────────────────────
@@ -441,6 +516,38 @@ mod zero_copy {
         let dup = unsafe { libc::dup(fd) };
         if dup < 0 { return Err(io::Error::last_os_error()); }
         Ok(unsafe { OwnedFd::from_raw_fd(dup) })
+    }
+}
+
+// ── 健康检查后台任务 ──────────────────────────────────────────────
+
+/// 每 30s 对所有 TCP 目标做 TCP 探测，失败时使 DNS 缓存失效
+async fn health_check_loop(rules: Vec<ForwardRule>, dns_cache: DnsCache) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(30)).await;
+
+        for rule in &rules {
+            // UDP-only 规则无需 TCP 健康检查
+            if matches!(rule.proto, Proto::Udp) { continue; }
+
+            for to_str in &rule.to {
+                let target = match crate::config::Target::parse(to_str) {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+                let addr = match dns_cache.resolve(&target.host, target.port_start, rule.ipv6).await {
+                    Ok(a) => a,
+                    Err(_) => continue,
+                };
+                match TcpStream::connect(addr).await {
+                    Ok(_) => log::debug!("健康检查 OK: {}", to_str),
+                    Err(e) => {
+                        log::warn!("健康检查失败: {} ({}): {}", to_str, addr, e);
+                        dns_cache.invalidate(&target.host, target.port_start, rule.ipv6);
+                    }
+                }
+            }
+        }
     }
 }
 

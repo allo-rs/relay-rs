@@ -1,8 +1,10 @@
 mod config;
 mod ctl;
+mod dns_cache;
 mod ip;
 mod nft;
 mod proxy;
+mod relay_state;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use nft::{ResolvedForward, ResolvedTarget};
