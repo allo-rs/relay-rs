@@ -23,6 +23,10 @@ dnf install nftables
 ### 一键安装（推荐）
 
 ```bash
+# 国内服务器（走代理）
+bash <(curl -fsSL https://mirror.ghproxy.com/https://raw.githubusercontent.com/allo-rs/relay-rs/main/install.sh)
+
+# 境外服务器（直连）
 bash <(curl -fsSL https://raw.githubusercontent.com/allo-rs/relay-rs/main/install.sh)
 ```
 
