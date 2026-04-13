@@ -2,45 +2,112 @@ mod config;
 mod ip;
 mod nft;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::thread::sleep;
 use std::time::Duration;
 
+const SERVICE: &str = "relay-rs";
+const CONFIG_PATH: &str = "/etc/relay-rs/relay.toml";
+
 #[derive(Parser)]
 #[command(name = "relay-rs", about = "基于 nftables 的 NAT 端口转发守护进程", version)]
-struct Args {
-    /// 配置文件路径
-    #[arg(short, long, default_value = "/etc/relay-rs/relay.toml")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    /// 配置文件路径（仅守护进程模式）
+    #[arg(short, long, default_value = CONFIG_PATH, global = true)]
     config: String,
 
-    /// 轮询间隔（秒）
-    #[arg(short, long, default_value_t = 60)]
+    /// 轮询间隔秒数（仅守护进程模式）
+    #[arg(short, long, default_value_t = 60, global = true)]
     interval: u64,
 }
 
+#[derive(Subcommand)]
+enum Command {
+    /// 启动服务
+    Start,
+    /// 停止服务
+    Stop,
+    /// 重启服务
+    Restart,
+    /// 查看服务状态
+    Status,
+    /// 实时查看日志
+    Log,
+    /// 编辑配置文件
+    Config,
+    /// 编辑配置并重启服务
+    Reload,
+}
+
 fn main() {
+    let cli = Cli::parse();
+
+    match cli.command {
+        Some(cmd) => run_ctl(cmd, &cli.config),
+        None => run_daemon(&cli.config, cli.interval),
+    }
+}
+
+/// 管理子命令
+fn run_ctl(cmd: Command, config: &str) {
+    match cmd {
+        Command::Start   => systemctl("start"),
+        Command::Stop    => systemctl("stop"),
+        Command::Restart => systemctl("restart"),
+        Command::Status  => systemctl("status"),
+        Command::Log     => journalctl(),
+        Command::Config  => edit_config(config),
+        Command::Reload  => { edit_config(config); systemctl("restart"); }
+    }
+}
+
+fn systemctl(action: &str) {
+    let status = std::process::Command::new("systemctl")
+        .args([action, SERVICE])
+        .status()
+        .unwrap_or_else(|e| { eprintln!("执行 systemctl 失败: {}", e); std::process::exit(1); });
+    std::process::exit(status.code().unwrap_or(1));
+}
+
+fn journalctl() {
+    let status = std::process::Command::new("journalctl")
+        .args(["-u", SERVICE, "-f"])
+        .status()
+        .unwrap_or_else(|e| { eprintln!("执行 journalctl 失败: {}", e); std::process::exit(1); });
+    std::process::exit(status.code().unwrap_or(1));
+}
+
+fn edit_config(config: &str) {
+    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vim".to_string());
+    std::process::Command::new(&editor)
+        .arg(config)
+        .status()
+        .unwrap_or_else(|e| { eprintln!("打开编辑器 {} 失败: {}", editor, e); std::process::exit(1); });
+}
+
+/// 守护进程模式
+fn run_daemon(config_path: &str, interval: u64) {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    let args = Args::parse();
-
-    // 开启内核 IP 转发
     enable_ip_forwarding();
 
-    log::info!("relay-rs 启动，配置文件: {}，轮询间隔: {}s", args.config, args.interval);
+    log::info!("relay-rs 启动，配置文件: {}，轮询间隔: {}s", config_path, interval);
 
     let mut last_script = String::new();
 
     loop {
-        match tick(&mut last_script, &args.config) {
-            Ok(true) => log::info!("规则已更新并应用"),
+        match tick(&mut last_script, config_path) {
+            Ok(true)  => log::info!("规则已更新并应用"),
             Ok(false) => log::debug!("规则无变化，跳过"),
-            Err(e) => log::error!("{}", e),
+            Err(e)    => log::error!("{}", e),
         }
-        sleep(Duration::from_secs(args.interval));
+        sleep(Duration::from_secs(interval));
     }
 }
 
-/// 执行一次轮询：加载配置 → 解析 IP → 比对脚本 → 按需应用
 fn tick(last_script: &mut String, config_path: &str) -> Result<bool, Box<dyn std::error::Error>> {
     let config = config::load(config_path)?;
 
@@ -48,7 +115,6 @@ fn tick(last_script: &mut String, config_path: &str) -> Result<bool, Box<dyn std
         log::warn!("配置中没有任何规则");
     }
 
-    // 解析每条规则的目标 IP（解析失败的规则跳过并告警）
     let resolved: Vec<(config::Rule, String)> = config
         .rules
         .into_iter()
@@ -67,7 +133,6 @@ fn tick(last_script: &mut String, config_path: &str) -> Result<bool, Box<dyn std
         })
         .collect();
 
-    // 生成脚本并与上次比对
     let script = nft::build_script(&resolved);
     if script == *last_script {
         return Ok(false);
@@ -84,7 +149,7 @@ fn enable_ip_forwarding() {
         "/proc/sys/net/ipv6/conf/all/forwarding",
     ] {
         match std::fs::write(path, "1") {
-            Ok(_) => log::debug!("已启用 {}", path),
+            Ok(_)  => log::debug!("已启用 {}", path),
             Err(e) => log::warn!("无法写入 {}: {}（非 root 运行？）", path, e),
         }
     }

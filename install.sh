@@ -91,36 +91,8 @@ EOF
 systemctl daemon-reload
 systemctl enable relay-rs
 
-# ── 安装 rr 管理命令 ──────────────────────────────────────────────
-cat > "${INSTALL_DIR}/rr" <<'EOF'
-#!/usr/bin/env bash
-CONFIG="/etc/relay-rs/relay.toml"
-SERVICE="relay-rs"
-
-usage() {
-  echo "用法: rr <命令>"
-  echo ""
-  echo "  start    启动服务"
-  echo "  stop     停止服务"
-  echo "  restart  重启服务"
-  echo "  status   查看状态"
-  echo "  log      实时日志"
-  echo "  config   编辑配置"
-  echo "  reload   保存配置并重启"
-}
-
-case "${1:-}" in
-  start)   systemctl start  $SERVICE ;;
-  stop)    systemctl stop   $SERVICE ;;
-  restart) systemctl restart $SERVICE ;;
-  status)  systemctl status  $SERVICE ;;
-  log)     journalctl -u $SERVICE -f ;;
-  config)  ${EDITOR:-vim} $CONFIG ;;
-  reload)  ${EDITOR:-vim} $CONFIG && systemctl restart $SERVICE ;;
-  *)       usage ;;
-esac
-EOF
-chmod +x "${INSTALL_DIR}/rr"
+# ── 安装 rr 软链 ─────────────────────────────────────────────────
+ln -sf "${INSTALL_DIR}/${BINARY_NAME}" "${INSTALL_DIR}/rr"
 
 info "systemd 服务已安装并设置开机自启"
 info ""
