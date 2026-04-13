@@ -4,12 +4,21 @@ mod ip;
 mod nft;
 
 use clap::{CommandFactory, Parser, Subcommand};
-use nft::ResolvedForward;
+use nft::{ResolvedForward, ResolvedTarget};
+use std::net::TcpStream;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::sleep;
 use std::time::Duration;
 
 const SERVICE: &str = "relay-rs";
 const CONFIG_PATH: &str = "/etc/relay-rs/relay.toml";
+/// 健康检查 TCP 连接超时
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(3);
+/// 轮询间隔下界：避免极短 TTL 导致高频 DNS 查询
+const MIN_INTERVAL: u64 = 15;
+/// 轮询间隔上界
+const MAX_INTERVAL: u64 = 300;
 
 #[derive(Parser)]
 #[command(name = "relay-rs", about = "基于 nftables 的 NAT 端口转发守护进程", version)]
@@ -21,7 +30,7 @@ struct Cli {
     #[arg(short, long, default_value = CONFIG_PATH, global = true)]
     config: String,
 
-    /// 轮询间隔秒数
+    /// 守护进程轮询间隔上限（秒），TTL 较短时会自动缩短
     #[arg(short, long, default_value_t = 60, global = true)]
     interval: u64,
 }
@@ -48,6 +57,8 @@ enum Command {
     Add,
     /// 交互式删除规则
     Del,
+    /// 检查转发规则连通性
+    Check,
     /// 查看各规则流量统计
     Stats,
     /// 以守护进程模式运行（供 systemd 调用）
@@ -81,6 +92,17 @@ fn run_ctl(cmd: Command, config: &str, interval: u64) {
         Command::Reload  => { edit_config(config); systemctl("restart"); }
         Command::Stats   => ctl::stats(),
         Command::Daemon  => run_daemon(config, interval),
+        Command::Check   => {
+            match config::load(config) {
+                Ok(cfg) => {
+                    if let Err(e) = ctl::check(&cfg) {
+                        eprintln!("{}", e);
+                        std::process::exit(1);
+                    }
+                }
+                Err(e) => { eprintln!("{}", e); std::process::exit(1); }
+            }
+        }
         Command::List    => {
             match config::load(config) {
                 Ok(cfg) => ctl::list(&cfg),
@@ -156,53 +178,129 @@ fn edit_config(config: &str) {
 fn run_daemon(config_path: &str, interval: u64) {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     enable_ip_forwarding();
-    log::info!("relay-rs 启动，配置: {}，轮询: {}s", config_path, interval);
+    log::info!("relay-rs 启动，配置: {}，最大轮询间隔: {}s", config_path, interval);
+
+    // 注册 SIGHUP 用于热重载（kill -HUP <pid>）
+    let reload = Arc::new(AtomicBool::new(false));
+    let reload_tx = Arc::clone(&reload);
+    match signal_hook::iterator::Signals::new([signal_hook::consts::SIGHUP]) {
+        Ok(mut signals) => {
+            std::thread::spawn(move || {
+                for _ in signals.forever() {
+                    reload_tx.store(true, Ordering::Relaxed);
+                }
+            });
+            log::info!("已注册 SIGHUP 热重载");
+        }
+        Err(e) => log::warn!("无法注册 SIGHUP: {}，热重载不可用", e),
+    }
 
     let mut last_script = String::new();
+    let mut next_sleep  = interval.clamp(MIN_INTERVAL, MAX_INTERVAL);
+
     loop {
-        match tick(&mut last_script, config_path) {
-            Ok(true)  => log::info!("规则已更新并应用"),
-            Ok(false) => log::debug!("规则无变化，跳过"),
-            Err(e)    => log::error!("{}", e),
+        if reload.swap(false, Ordering::Relaxed) {
+            log::info!("收到 SIGHUP，立即重新加载配置");
         }
-        sleep(Duration::from_secs(interval));
+
+        match tick(&mut last_script, config_path) {
+            Ok((true, ttl))  => { log::info!("规则已更新并应用"); next_sleep = calc_interval(ttl, interval); }
+            Ok((false, ttl)) => { log::debug!("规则无变化，跳过"); next_sleep = calc_interval(ttl, interval); }
+            Err(e)           => log::error!("{}", e),
+        }
+        log::debug!("下次检查: {}s 后", next_sleep);
+
+        // 分段睡眠，每秒检查一次 SIGHUP
+        for _ in 0..next_sleep {
+            if reload.load(Ordering::Relaxed) { break; }
+            sleep(Duration::from_secs(1));
+        }
     }
 }
 
-fn tick(last_script: &mut String, config_path: &str) -> Result<bool, Box<dyn std::error::Error>> {
+/// 根据最小 TTL 和用户配置计算实际轮询间隔
+fn calc_interval(min_ttl: Option<u64>, configured: u64) -> u64 {
+    match min_ttl {
+        Some(ttl) => ttl.min(configured),
+        None      => configured,
+    }.clamp(MIN_INTERVAL, MAX_INTERVAL)
+}
+
+fn tick(last_script: &mut String, config_path: &str) -> Result<(bool, Option<u64>), Box<dyn std::error::Error>> {
     let cfg = config::load(config_path)?;
 
     if cfg.forward.is_empty() && cfg.block.is_empty() {
         log::warn!("配置中没有任何规则");
     }
 
-    // 解析转发规则的 DNS
-    let forwards: Vec<ResolvedForward> = cfg.forward.into_iter().filter_map(|rule| {
+    let mut min_ttl: Option<u64> = None;
+    let mut forwards: Vec<ResolvedForward> = Vec::new();
+
+    'rule: for rule in cfg.forward {
         let listen = match config::Listen::parse(&rule.listen) {
             Ok(l) => l,
-            Err(e) => { log::warn!("跳过转发规则: {}", e); return None; }
+            Err(e) => { log::warn!("跳过规则 [{}]: {}", rule.listen, e); continue; }
         };
-        let target = match config::Target::parse(&rule.to) {
-            Ok(t) => t,
-            Err(e) => { log::warn!("跳过转发规则: {}", e); return None; }
-        };
-        match ip::resolve(&target.host, rule.ipv6) {
-            Ok(ip) => {
-                log::debug!("{} → {}", target.host, ip);
-                Some(ResolvedForward { rule, listen, target, ip })
+
+        let mut resolved_targets: Vec<ResolvedTarget> = Vec::new();
+
+        for to_str in &rule.to {
+            let target = match config::Target::parse(to_str) {
+                Ok(t) => t,
+                Err(e) => { log::warn!("跳过目标 {}: {}", to_str, e); continue; }
+            };
+
+            // DNS 解析（含 TTL）
+            let (ip, ttl) = match ip::resolve_with_ttl(&target.host, rule.ipv6) {
+                Ok(r) => r,
+                Err(e) => { log::warn!("跳过目标 {}: {}", to_str, e); continue; }
+            };
+
+            let ttl_display = if ttl == u32::MAX { "∞".to_string() } else { format!("{}s", ttl) };
+            log::debug!("{} → {} (TTL {})", target.host, ip, ttl_display);
+
+            // 更新全局最小 TTL（静态 IP 的 u32::MAX 不计入）
+            if ttl != u32::MAX {
+                let t = ttl as u64;
+                min_ttl = Some(min_ttl.map_or(t, |m| m.min(t)));
             }
-            Err(e) => { log::warn!("跳过转发规则 ({}): {}", target.host, e); None }
+
+            // TCP 健康检查（UDP-only 规则跳过）
+            if !matches!(rule.proto, config::Proto::Udp) {
+                let addr_str = if ip.contains(':') {
+                    format!("[{}]:{}", ip, target.port_start)
+                } else {
+                    format!("{}:{}", ip, target.port_start)
+                };
+                if let Ok(addr) = addr_str.parse() {
+                    if TcpStream::connect_timeout(&addr, HEALTH_TIMEOUT).is_err() {
+                        let label = rule.comment.as_deref().unwrap_or(to_str);
+                        log::warn!("健康检查失败，暂时跳过目标「{}」({})", label, addr_str);
+                        continue;
+                    }
+                }
+            }
+
+            resolved_targets.push(ResolvedTarget { target, ip });
         }
-    }).collect();
+
+        if resolved_targets.is_empty() {
+            let label = rule.comment.as_deref().unwrap_or(&rule.listen);
+            log::warn!("规则「{}」所有目标均不可用，跳过", label);
+            continue 'rule;
+        }
+
+        forwards.push(ResolvedForward { rule, listen, targets: resolved_targets });
+    }
 
     let script = nft::build_script(&forwards, &cfg.block);
     if script == *last_script {
-        return Ok(false);
+        return Ok((false, min_ttl));
     }
 
     nft::apply(&forwards, &cfg.block)?;
     *last_script = script;
-    Ok(true)
+    Ok((true, min_ttl))
 }
 
 fn enable_ip_forwarding() {
