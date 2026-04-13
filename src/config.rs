@@ -73,12 +73,29 @@ pub struct BlockRule {
     pub comment: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ForwardMode {
+    /// nftables DNAT，内核直转（默认）
+    #[default]
+    Kernel,
+    /// tokio 异步代理，用户态转发
+    Userspace,
+}
+
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct Config {
+    /// 转发模式（默认 kernel，kernel 时不写入配置文件）
+    #[serde(default, skip_serializing_if = "ForwardMode::is_kernel")]
+    pub mode: ForwardMode,
     #[serde(default)]
     pub forward: Vec<ForwardRule>,
     #[serde(default)]
     pub block: Vec<BlockRule>,
+}
+
+impl ForwardMode {
+    fn is_kernel(&self) -> bool { *self == ForwardMode::Kernel }
 }
 
 // ── 解析后的端口信息 ──────────────────────────────────────────────
