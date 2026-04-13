@@ -1,9 +1,9 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 
 // ── 枚举 ──────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, Clone, PartialEq, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Proto {
     Tcp,
@@ -12,7 +12,7 @@ pub enum Proto {
     All,
 }
 
-#[derive(Debug, Deserialize, Clone, PartialEq, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Chain {
     #[default]
@@ -22,7 +22,7 @@ pub enum Chain {
 
 // ── 配置结构 ──────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ForwardRule {
     /// 本机监听端口，单端口 "10000" 或端口段 "10000-10100"
     pub listen: String,
@@ -36,7 +36,7 @@ pub struct ForwardRule {
     pub comment: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct BlockRule {
     /// 源 IP 或 CIDR，如 "1.2.3.4" 或 "10.0.0.0/8"
     pub src: Option<String>,
@@ -55,7 +55,7 @@ pub struct BlockRule {
     pub comment: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default)]
 pub struct Config {
     #[serde(default)]
     pub forward: Vec<ForwardRule>,
@@ -119,4 +119,12 @@ pub fn load(path: &str) -> Result<Config, Box<dyn std::error::Error>> {
     let config: Config = toml::from_str(&content)
         .map_err(|e| format!("解析配置文件失败: {}", e))?;
     Ok(config)
+}
+
+pub fn save(config: &Config, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let content = toml::to_string_pretty(config)
+        .map_err(|e| format!("序列化配置失败: {}", e))?;
+    fs::write(path, content)
+        .map_err(|e| format!("写入配置文件 {} 失败: {}", path, e))?;
+    Ok(())
 }

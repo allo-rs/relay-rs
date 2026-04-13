@@ -1,4 +1,5 @@
 mod config;
+mod ctl;
 mod ip;
 mod nft;
 
@@ -41,6 +42,15 @@ enum Command {
     Config,
     /// 编辑配置并重启服务
     Reload,
+    /// 列出所有规则
+    List,
+    /// 交互式添加规则
+    Add,
+    /// 删除指定规则（按 rr list 显示的序号）
+    Del {
+        /// 规则序号
+        index: usize,
+    },
 }
 
 fn main() {
@@ -62,6 +72,40 @@ fn run_ctl(cmd: Command, config: &str) {
         Command::Log     => journalctl(),
         Command::Config  => edit_config(config),
         Command::Reload  => { edit_config(config); systemctl("restart"); }
+        Command::List    => {
+            match config::load(config) {
+                Ok(cfg) => ctl::list(&cfg),
+                Err(e)  => { eprintln!("{}", e); std::process::exit(1); }
+            }
+        }
+        Command::Add => {
+            let mut cfg = config::load(config).unwrap_or_default();
+            match ctl::add(&mut cfg) {
+                Ok(_) => match config::save(&cfg, config) {
+                    Ok(_) => {
+                        println!("已保存。运行 rr restart 使规则生效。");
+                        ctl::list(&cfg);
+                    }
+                    Err(e) => { eprintln!("保存失败: {}", e); std::process::exit(1); }
+                },
+                Err(e) => { eprintln!("错误: {}", e); std::process::exit(1); }
+            }
+        }
+        Command::Del { index } => {
+            let mut cfg = match config::load(config) {
+                Ok(c) => c,
+                Err(e) => { eprintln!("{}", e); std::process::exit(1); }
+            };
+            ctl::list(&cfg);
+            println!();
+            match ctl::del(&mut cfg, index) {
+                Ok(_) => match config::save(&cfg, config) {
+                    Ok(_) => println!("已保存。运行 rr restart 使规则生效。"),
+                    Err(e) => { eprintln!("保存失败: {}", e); std::process::exit(1); }
+                },
+                Err(e) => { eprintln!("错误: {}", e); std::process::exit(1); }
+            }
+        }
     }
 }
 
@@ -82,7 +126,7 @@ fn journalctl() {
 }
 
 fn edit_config(config: &str) {
-    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vim".to_string());
+    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".to_string());
     std::process::Command::new(&editor)
         .arg(config)
         .status()
