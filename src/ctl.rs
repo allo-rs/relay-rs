@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
 
-use crate::config::{Balance, BlockRule, Chain, Config, ForwardRule, Proto};
+use crate::config::{Balance, BlockRule, Chain, Config, ForwardMode, ForwardRule, Proto};
 use crate::ip;
 
 // ── rr list ───────────────────────────────────────────────────────
@@ -440,6 +440,43 @@ fn format_bytes(b: u64) -> String {
     else if b >= 1 << 20 { format!("{:.2} MB", b as f64 / (1u64 << 20) as f64) }
     else if b >= 1 << 10 { format!("{:.2} KB", b as f64 / (1u64 << 10) as f64) }
     else { format!("{} B", b) }
+}
+
+// ── rr mode ──────────────────────────────────────────────────────
+
+/// 返回 Ok(true) 表示需要重启服务
+pub fn mode_cmd(mut config: Config, config_path: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    let theme = ColorfulTheme::default();
+
+    let current = match config.mode {
+        ForwardMode::Kernel    => 0usize,
+        ForwardMode::Userspace => 1,
+    };
+
+    let idx = Select::with_theme(&theme)
+        .with_prompt(format!(
+            "转发模式（当前: {}）",
+            if current == 0 { "kernel" } else { "userspace" }
+        ))
+        .items(&[
+            "kernel     — nftables DNAT，内核直转，性能最优（推荐）",
+            "userspace  — tokio 异步代理，无需 root，支持复杂场景",
+        ])
+        .default(current)
+        .interact()?;
+
+    let new_mode = if idx == 0 { ForwardMode::Kernel } else { ForwardMode::Userspace };
+
+    if new_mode == config.mode {
+        println!("模式未变更（{}）", if idx == 0 { "kernel" } else { "userspace" });
+        return Ok(false);
+    }
+
+    config.mode = new_mode;
+    crate::config::save(&config, config_path)?;
+    println!("已切换 → {}", if idx == 0 { "kernel" } else { "userspace" });
+    println!();
+    Ok(true)
 }
 
 // ── 确认提示 ──────────────────────────────────────────────────────

@@ -2,6 +2,7 @@ mod config;
 mod ctl;
 mod ip;
 mod nft;
+mod proxy;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use nft::{ResolvedForward, ResolvedTarget};
@@ -59,6 +60,8 @@ enum Command {
     Del,
     /// 检查转发规则连通性
     Check,
+    /// 切换转发模式（kernel / userspace）
+    Mode,
     /// 查看各规则流量统计
     Stats,
     /// 以守护进程模式运行（供 systemd 调用）
@@ -91,6 +94,18 @@ fn run_ctl(cmd: Command, config: &str, interval: u64) {
         Command::Config  => edit_config(config),
         Command::Reload  => { edit_config(config); systemctl("restart"); }
         Command::Stats   => ctl::stats(),
+        Command::Mode    => {
+            let cfg = config::load(config).unwrap_or_default();
+            match ctl::mode_cmd(cfg, config) {
+                Ok(true) => {
+                    if ctl::confirm("立即重启服务使变更生效？[Y/n]", true) {
+                        systemctl("restart");
+                    }
+                }
+                Ok(false) => {}
+                Err(e) => { eprintln!("{}", e); std::process::exit(1); }
+            }
+        }
         Command::Daemon  => run_daemon(config, interval),
         Command::Check   => {
             match config::load(config) {
@@ -177,24 +192,41 @@ fn edit_config(config: &str) {
 
 fn run_daemon(config_path: &str, interval: u64) {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    enable_ip_forwarding();
-    log::info!("relay-rs 启动，配置: {}，最大轮询间隔: {}s", config_path, interval);
 
-    // 注册 SIGHUP 用于热重载（kill -HUP <pid>）
+    let mode = config::load(config_path).map(|c| c.mode).unwrap_or_default();
+    log::info!("relay-rs 启动，模式: {}", match mode {
+        config::ForwardMode::Kernel    => "kernel (nftables)",
+        config::ForwardMode::Userspace => "userspace (tokio)",
+    });
+
+    // 注册 SIGHUP 用于热重载，两种模式共用
     let reload = Arc::new(AtomicBool::new(false));
     let reload_tx = Arc::clone(&reload);
     match signal_hook::iterator::Signals::new([signal_hook::consts::SIGHUP]) {
         Ok(mut signals) => {
             std::thread::spawn(move || {
-                for _ in signals.forever() {
-                    reload_tx.store(true, Ordering::Relaxed);
-                }
+                for _ in signals.forever() { reload_tx.store(true, Ordering::Relaxed); }
             });
             log::info!("已注册 SIGHUP 热重载");
         }
         Err(e) => log::warn!("无法注册 SIGHUP: {}，热重载不可用", e),
     }
 
+    match mode {
+        config::ForwardMode::Kernel => {
+            enable_ip_forwarding();
+            log::info!("配置: {}，最大轮询间隔: {}s", config_path, interval);
+            run_kernel_daemon(config_path, interval, reload);
+        }
+        config::ForwardMode::Userspace => {
+            // 清理可能残留的 nftables 规则（从内核模式切换过来时）
+            nft::clear_tables();
+            run_userspace_daemon(config_path, reload);
+        }
+    }
+}
+
+fn run_kernel_daemon(config_path: &str, interval: u64, reload: Arc<AtomicBool>) {
     let mut last_script = String::new();
     let mut next_sleep  = interval.clamp(MIN_INTERVAL, MAX_INTERVAL);
 
@@ -210,12 +242,19 @@ fn run_daemon(config_path: &str, interval: u64) {
         }
         log::debug!("下次检查: {}s 后", next_sleep);
 
-        // 分段睡眠，每秒检查一次 SIGHUP
         for _ in 0..next_sleep {
             if reload.load(Ordering::Relaxed) { break; }
             sleep(Duration::from_secs(1));
         }
     }
+}
+
+fn run_userspace_daemon(config_path: &str, reload: Arc<AtomicBool>) {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("无法创建 proxy runtime");
+    rt.block_on(proxy::run(config_path, reload));
 }
 
 /// 根据最小 TTL 和用户配置计算实际轮询间隔
