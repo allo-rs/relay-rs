@@ -29,7 +29,8 @@ info "检测到架构: $ARCH，使用产物: $ARTIFACT"
 
 # ── 获取最新版本号 ─────────────────────────────────────────────────
 info "获取最新版本..."
-LATEST=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
+LATEST=$(curl -fsSL --connect-timeout 10 --max-time 30 \
+  "https://api.github.com/repos/${REPO}/releases/latest" \
   | grep '"tag_name"' | cut -d'"' -f4)
 [[ -z "$LATEST" ]] && error "无法获取最新版本，请检查仓库地址或网络"
 info "最新版本: $LATEST"
@@ -39,7 +40,7 @@ DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST}/${ARTIFACT}
 TMP_BIN=$(mktemp)
 
 info "下载 $DOWNLOAD_URL ..."
-curl -fsSL -o "$TMP_BIN" "$DOWNLOAD_URL" || error "下载失败"
+curl -fsSL --connect-timeout 10 --max-time 120 -o "$TMP_BIN" "$DOWNLOAD_URL" || error "下载失败"
 chmod +x "$TMP_BIN"
 mv "$TMP_BIN" "${INSTALL_DIR}/${BINARY_NAME}"
 
