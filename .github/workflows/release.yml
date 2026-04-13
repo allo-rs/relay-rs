@@ -28,6 +28,9 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: 安装 zig
+        uses: mlugg/setup-zig@v1
+
       - name: 安装 cargo-zigbuild
         uses: taiki-e/install-action@v2
         with:
