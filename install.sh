@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ── 配置 ──────────────────────────────────────────────────────────
-REPO="your-github-username/relay-rs"   # ← 替换为你的仓库
+REPO="allo-rs/relay-rs"
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/relay-rs"
 SERVICE_FILE="/etc/systemd/system/relay-rs.service"

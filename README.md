@@ -23,7 +23,7 @@ dnf install nftables
 ### 一键安装（推荐）
 
 ```bash
-sudo bash <(curl -fsSL https://raw.githubusercontent.com/your-github-username/relay-rs/main/install.sh)
+sudo bash <(curl -fsSL https://raw.githubusercontent.com/allo-rs/relay-rs/main/install.sh)
 ```
 
 自动完成：检测架构 → 下载最新二进制 → 创建配置模板 → 安装 systemd 服务。
