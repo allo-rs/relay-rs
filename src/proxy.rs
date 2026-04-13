@@ -1,21 +1,28 @@
-/// 用户态 TCP 代理模块
+/// 用户态 TCP/UDP 代理模块
 ///
 /// Linux：使用 splice(2) 零拷贝转发，数据在内核 pipe buffer ↔ socket buffer 间移动，
 ///        不经过 userspace 内存。
 /// 其他平台：回退到 tokio::io::copy_bidirectional（userspace 8KB 缓冲区）。
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tokio::io;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::task::JoinSet;
+use tokio::time::timeout;
 
 use crate::config::{Balance, ForwardRule, Listen, Proto};
 
 static RR_CTR: AtomicUsize = AtomicUsize::new(0);
+
+/// UDP session 空闲超时时间
+const UDP_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+/// UDP 收包缓冲区大小
+const UDP_BUF_SIZE: usize = 65536;
 
 // ── 主循环 ────────────────────────────────────────────────────────
 
@@ -37,19 +44,38 @@ pub async fn run(config_path: &str, reload: Arc<AtomicBool>) {
         let mut set: JoinSet<()> = JoinSet::new();
 
         for rule in cfg.forward {
-            if matches!(rule.proto, Proto::Udp) {
-                log::warn!("用户态模式暂不支持 UDP，跳过: {}", rule.listen);
-                continue;
-            }
             let listen = match crate::config::Listen::parse(&rule.listen) {
                 Ok(l) => l,
                 Err(e) => { log::warn!("跳过规则 [{}]: {}", rule.listen, e); continue; }
             };
-            if matches!(listen, Listen::Range(_, _)) {
-                log::warn!("用户态模式暂不支持端口段，跳过: {}", rule.listen);
-                continue;
+
+            // 根据 proto 决定启动 TCP / UDP / 两者
+            let need_tcp = !matches!(rule.proto, Proto::Udp);
+            let need_udp = matches!(rule.proto, Proto::Udp | Proto::All);
+
+            if need_tcp {
+                let rule_clone = rule.clone();
+                let listen_clone = listen.clone();
+                set.spawn(listen_rule(rule_clone, listen_clone));
             }
-            set.spawn(listen_rule(rule, listen));
+
+            if need_udp {
+                match &listen {
+                    Listen::Single(port) => {
+                        let p = *port;
+                        let rule_clone = rule.clone();
+                        set.spawn(listen_udp_rule(rule_clone, p, 0));
+                    }
+                    Listen::Range(start, end) => {
+                        for i in 0..=(*end - *start) {
+                            let port = start + i;
+                            let rule_clone = rule.clone();
+                            let offset = i;
+                            set.spawn(listen_udp_rule(rule_clone, port, offset));
+                        }
+                    }
+                }
+            }
         }
 
         loop {
@@ -63,20 +89,41 @@ pub async fn run(config_path: &str, reload: Arc<AtomicBool>) {
     }
 }
 
-// ── 单规则监听 ────────────────────────────────────────────────────
+// ── 单规则 TCP 监听（支持端口段） ─────────────────────────────────
 
 async fn listen_rule(rule: ForwardRule, listen: Listen) {
-    let port = match listen { Listen::Single(p) => p, Listen::Range(..) => return };
+    match listen {
+        Listen::Single(port) => {
+            listen_single_tcp(rule, port, 0).await;
+        }
+        Listen::Range(start, end) => {
+            let mut set: JoinSet<()> = JoinSet::new();
+            for i in 0..=(end - start) {
+                let port = start + i;
+                let offset = i;
+                let rule = rule.clone();
+                set.spawn(async move {
+                    listen_single_tcp(rule, port, offset).await;
+                });
+            }
+            // 等待所有子任务结束（通常不会结束，除非被 abort）
+            while set.join_next().await.is_some() {}
+        }
+    }
+}
+
+/// 在单个端口上监听 TCP 连接，port_offset 用于端口段的目标端口偏移
+async fn listen_single_tcp(rule: ForwardRule, port: u16, port_offset: u16) {
     let bind = format!("0.0.0.0:{}", port);
 
     let listener = match TcpListener::bind(&bind).await {
         Ok(l) => l,
-        Err(e) => { log::error!("监听 {} 失败: {}", bind, e); return; }
+        Err(e) => { log::error!("TCP 监听 {} 失败: {}", bind, e); return; }
     };
 
     let label = rule.comment.as_deref().unwrap_or(&rule.listen).to_string();
     log::info!(
-        "用户态监听 {}  [{}]  ({})",
+        "用户态 TCP 监听 {}  [{}]  ({})",
         bind, label,
         if cfg!(target_os = "linux") { "splice 零拷贝" } else { "copy 模式" }
     );
@@ -85,19 +132,140 @@ async fn listen_rule(rule: ForwardRule, listen: Listen) {
         match listener.accept().await {
             Ok((client, peer)) => {
                 let rule = rule.clone();
-                tokio::spawn(relay(client, peer, rule));
+                tokio::spawn(relay(client, peer, rule, port_offset));
             }
             Err(e) => {
-                log::error!("accept 失败 {}: {}", bind, e);
+                log::error!("TCP accept 失败 {}: {}", bind, e);
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
     }
 }
 
-// ── 单连接转发 ────────────────────────────────────────────────────
+// ── UDP 中继 ──────────────────────────────────────────────────────
 
-async fn relay(mut client: TcpStream, peer: SocketAddr, rule: ForwardRule) {
+/// 在单个端口上监听 UDP 数据报并中继到目标，port_offset 用于端口段的目标端口偏移
+async fn listen_udp_rule(rule: ForwardRule, port: u16, port_offset: u16) {
+    let bind = format!("0.0.0.0:{}", port);
+
+    let local_sock = match UdpSocket::bind(&bind).await {
+        Ok(s) => Arc::new(s),
+        Err(e) => { log::error!("UDP 监听 {} 失败: {}", bind, e); return; }
+    };
+
+    let label = rule.comment.as_deref().unwrap_or(&rule.listen).to_string();
+    log::info!("用户态 UDP 监听 {}  [{}]", bind, label);
+
+    // client_addr → 已连接到目标的 UdpSocket
+    let sessions: Arc<Mutex<HashMap<SocketAddr, Arc<UdpSocket>>>> =
+        Arc::new(Mutex::new(HashMap::<SocketAddr, Arc<UdpSocket>>::new()));
+
+    let mut buf = vec![0u8; UDP_BUF_SIZE];
+
+    loop {
+        // 接收来自客户端的数据报
+        let (n, client_addr) = match local_sock.recv_from(&mut buf).await {
+            Ok(v) => v,
+            Err(e) => {
+                log::warn!("UDP recv_from {} 失败: {}", bind, e);
+                continue;
+            }
+        };
+
+        let data = buf[..n].to_vec();
+
+        // 解析目标地址
+        let to_str = pick_target(&rule.to, &rule.balance);
+        if to_str.is_empty() { continue; }
+
+        let target = match crate::config::Target::parse(&to_str) {
+            Ok(t) => t,
+            Err(e) => { log::warn!("目标解析失败 {}: {}", to_str, e); continue; }
+        };
+
+        // 端口段偏移
+        let target_port = target.port_start.saturating_add(port_offset);
+        let lookup_str = format!("{}:{}", target.host, target_port);
+
+        let addrs: Vec<SocketAddr> = match tokio::net::lookup_host(&lookup_str).await {
+            Ok(iter) => iter.collect(),
+            Err(e) => { log::warn!("DNS 解析 {} 失败: {}", lookup_str, e); continue; }
+        };
+
+        let target_addr = if rule.ipv6 {
+            addrs.iter().find(|a| a.is_ipv6()).copied()
+        } else {
+            addrs.iter().find(|a| a.is_ipv4()).copied()
+                .or_else(|| addrs.iter().find(|a| a.is_ipv6()).copied())
+        };
+
+        let target_addr = match target_addr {
+            Some(a) => a,
+            None => { log::warn!("UDP 无法解析 {}", lookup_str); continue; }
+        };
+
+        // 查找或创建 per-client 的出站 UdpSocket
+        let target_sock: Arc<UdpSocket> = {
+            // 先在锁内检查是否已有 session
+            let existing = sessions.lock().unwrap().get(&client_addr).cloned();
+            if let Some(s) = existing {
+                s
+            } else {
+                // 绑定到随机端口，connect 到目标
+                let sock = match UdpSocket::bind("0.0.0.0:0").await {
+                    Ok(s) => s,
+                    Err(e) => { log::warn!("UDP 出站 socket bind 失败: {}", e); continue; }
+                };
+                if let Err(e) = sock.connect(target_addr).await {
+                    log::warn!("UDP connect {} 失败: {}", target_addr, e);
+                    continue;
+                }
+                let sock = Arc::new(sock);
+                sessions.lock().unwrap().insert(client_addr, sock.clone());
+
+                // spawn 回包任务：target → client
+                let sock_rx = sock.clone();
+                let local_sock_tx = local_sock.clone();
+                let sessions_gc = sessions.clone();
+                tokio::spawn(async move {
+                    let mut rbuf = vec![0u8; UDP_BUF_SIZE];
+                    loop {
+                        match timeout(UDP_IDLE_TIMEOUT, sock_rx.recv(&mut rbuf)).await {
+                            Ok(Ok(m)) => {
+                                if let Err(e) = local_sock_tx.send_to(&rbuf[..m], client_addr).await {
+                                    log::debug!("UDP 回包 → {} 失败: {}", client_addr, e);
+                                    break;
+                                }
+                            }
+                            Ok(Err(e)) => {
+                                log::debug!("UDP recv 失败 ({}): {}", client_addr, e);
+                                break;
+                            }
+                            Err(_) => {
+                                // 120s 空闲超时，清除 session
+                                log::debug!("UDP session 超时，清除: {}", client_addr);
+                                break;
+                            }
+                        }
+                    }
+                    // 从 sessions map 中移除
+                    sessions_gc.lock().unwrap().remove(&client_addr);
+                });
+
+                sock
+            }
+        };
+
+        // 转发数据到目标
+        if let Err(e) = target_sock.send(&data).await {
+            log::warn!("UDP 转发 → {} 失败: {}", target_addr, e);
+        }
+    }
+}
+
+// ── 单连接 TCP 转发 ───────────────────────────────────────────────
+
+async fn relay(mut client: TcpStream, peer: SocketAddr, rule: ForwardRule, port_offset: u16) {
     let to_str = pick_target(&rule.to, &rule.balance);
     if to_str.is_empty() { return; }
 
@@ -106,7 +274,9 @@ async fn relay(mut client: TcpStream, peer: SocketAddr, rule: ForwardRule) {
         Err(e) => { log::warn!("目标解析失败 {}: {}", to_str, e); return; }
     };
 
-    let lookup_str = format!("{}:{}", target.host, target.port_start);
+    // 端口段偏移
+    let target_port = target.port_start.saturating_add(port_offset);
+    let lookup_str = format!("{}:{}", target.host, target_port);
     let addrs: Vec<SocketAddr> = match tokio::net::lookup_host(&lookup_str).await {
         Ok(iter) => iter.collect(),
         Err(e) => { log::warn!("DNS 解析 {} 失败: {}", lookup_str, e); return; }
