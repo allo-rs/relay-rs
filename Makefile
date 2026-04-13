@@ -7,22 +7,25 @@ NEXT_PATCH := $(MAJOR).$(MINOR).$(shell expr $(PATCH) + 1)
 NEXT_MINOR := $(MAJOR).$(shell expr $(MINOR) + 1).0
 NEXT_MAJOR := $(shell expr $(MAJOR) + 1).0.0
 
-.PHONY: build release release-minor release-major
+.PHONY: build release _do_release
 
 build:
 	cargo build --release
 
-## 发布 patch 版本（0.1.0 → 0.1.1）
 release:
-	@$(MAKE) _do_release NEXT=$(NEXT_PATCH)
-
-## 发布 minor 版本（0.1.0 → 0.2.0）
-release-minor:
-	@$(MAKE) _do_release NEXT=$(NEXT_MINOR)
-
-## 发布 major 版本（0.1.0 → 1.0.0）
-release-major:
-	@$(MAKE) _do_release NEXT=$(NEXT_MAJOR)
+	@echo "当前版本: $(CURRENT)"
+	@echo ""
+	@echo "  x) patch  →  $(NEXT_PATCH)"
+	@echo "  y) minor  →  $(NEXT_MINOR)"
+	@echo "  z) major  →  $(NEXT_MAJOR)"
+	@echo ""
+	@read -p "选择 [x/y/z]: " choice; \
+	case "$$choice" in \
+		x) $(MAKE) _do_release NEXT=$(NEXT_PATCH) ;; \
+		y) $(MAKE) _do_release NEXT=$(NEXT_MINOR) ;; \
+		z) $(MAKE) _do_release NEXT=$(NEXT_MAJOR) ;; \
+		*) echo "已取消" ;; \
+	esac
 
 _do_release:
 	@echo "$(CURRENT) → $(NEXT)"
