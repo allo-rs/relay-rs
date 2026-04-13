@@ -17,19 +17,51 @@ pub enum IpVersion {
     All,
 }
 
+/// 一条转发规则，通过 `type` 字段区分类型
 #[derive(Debug, Deserialize, Clone)]
-pub struct Rule {
-    /// 本机监听端口
-    pub sport: u16,
-    /// 目标端口
-    pub dport: u16,
-    /// 目标域名或 IP
-    pub target: String,
-    #[serde(default = "default_protocol")]
-    pub protocol: Protocol,
-    #[serde(default = "default_ip_version")]
-    pub ip_version: IpVersion,
-    pub comment: Option<String>,
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum Rule {
+    /// 单端口转发：本机 sport → target:dport
+    Single {
+        sport: u16,
+        dport: u16,
+        target: String,
+        #[serde(default = "default_protocol")]
+        protocol: Protocol,
+        #[serde(default = "default_ip_version")]
+        ip_version: IpVersion,
+        comment: Option<String>,
+    },
+    /// 端口段转发：本机 sport_start-sport_end → target:dport_start-dport_end
+    Range {
+        sport_start: u16,
+        sport_end: u16,
+        /// 目标起始端口，默认与 sport_start 相同
+        #[serde(default)]
+        dport_start: Option<u16>,
+        target: String,
+        #[serde(default = "default_protocol")]
+        protocol: Protocol,
+        #[serde(default = "default_ip_version")]
+        ip_version: IpVersion,
+        comment: Option<String>,
+    },
+}
+
+impl Rule {
+    pub fn target(&self) -> &str {
+        match self {
+            Rule::Single { target, .. } => target,
+            Rule::Range { target, .. } => target,
+        }
+    }
+
+    pub fn ip_version(&self) -> &IpVersion {
+        match self {
+            Rule::Single { ip_version, .. } => ip_version,
+            Rule::Range { ip_version, .. } => ip_version,
+        }
+    }
 }
 
 fn default_protocol() -> Protocol {

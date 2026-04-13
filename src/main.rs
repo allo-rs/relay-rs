@@ -53,14 +53,14 @@ fn tick(last_script: &mut String, config_path: &str) -> Result<bool, Box<dyn std
         .rules
         .into_iter()
         .filter_map(|rule| {
-            match ip::resolve(&rule.target, &rule.ip_version) {
+            match ip::resolve(rule.target(), rule.ip_version()) {
                 Ok(ips) => {
                     let ip = ips.into_iter().next().unwrap();
-                    log::debug!("{}:{} → {}:{} ({})", rule.sport, rule.target, ip, rule.dport, ip);
+                    log::debug!("解析 {} → {}", rule.target(), ip);
                     Some((rule, ip))
                 }
                 Err(e) => {
-                    log::warn!("跳过规则 sport={}: {}", rule.sport, e);
+                    log::warn!("跳过规则 (target={}): {}", rule.target(), e);
                     None
                 }
             }

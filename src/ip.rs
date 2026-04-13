@@ -3,7 +3,7 @@ use std::net::{IpAddr, ToSocketAddrs};
 
 use crate::config::IpVersion;
 
-/// 将域名或 IP 字符串解析为目标地址列表。
+/// 将域名或 IP 字符串解析为地址列表。
 /// - 若输入已是合法 IP，直接返回（验证版本匹配）
 /// - 否则进行 DNS 查询，根据 ip_version 筛选结果
 pub fn resolve(target: &str, ip_version: &IpVersion) -> io::Result<Vec<String>> {

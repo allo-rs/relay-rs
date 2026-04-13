@@ -46,24 +46,63 @@ pub fn build_script(resolved: &[(Rule, String)]) -> String {
         s.push('\n');
     }
 
-    // 逐条生成 Single 转发规则
     for (rule, ip) in resolved {
-        let versions = expand_ip_version(&rule.ip_version, ip);
-        for version in versions {
-            append_single_rule(&mut s, rule, ip, &version);
+        match rule {
+            Rule::Single {
+                sport,
+                dport,
+                protocol,
+                ip_version,
+                comment,
+                ..
+            } => {
+                let versions = resolve_versions(ip_version, ip);
+                for version in versions {
+                    append_single(
+                        &mut s, *sport, *dport, ip, protocol, &version, comment,
+                    );
+                }
+            }
+            Rule::Range {
+                sport_start,
+                sport_end,
+                dport_start,
+                protocol,
+                ip_version,
+                comment,
+                ..
+            } => {
+                // dport_start 未指定时与 sport_start 相同（仅改目标 IP，不改端口）
+                let dport_begin = dport_start.unwrap_or(*sport_start);
+                let dport_end =
+                    dport_begin + (sport_end - sport_start);
+                let versions = resolve_versions(ip_version, ip);
+                for version in versions {
+                    append_range(
+                        &mut s,
+                        *sport_start,
+                        *sport_end,
+                        dport_begin,
+                        dport_end,
+                        ip,
+                        protocol,
+                        &version,
+                        comment,
+                    );
+                }
+            }
         }
     }
 
     s
 }
 
-/// 将 IpVersion::All 展开为实际版本列表（根据解析到的 IP 类型）
-fn expand_ip_version(version: &IpVersion, ip: &str) -> Vec<IpVersion> {
+/// 将 IpVersion::All 展开为实际版本（根据解析到的 IP 类型判断）
+fn resolve_versions(version: &IpVersion, ip: &str) -> Vec<IpVersion> {
     match version {
         IpVersion::Ipv4 => vec![IpVersion::Ipv4],
         IpVersion::Ipv6 => vec![IpVersion::Ipv6],
         IpVersion::All => {
-            // 根据实际解析到的 IP 判断
             if ip.contains(':') {
                 vec![IpVersion::Ipv6]
             } else {
@@ -73,46 +112,95 @@ fn expand_ip_version(version: &IpVersion, ip: &str) -> Vec<IpVersion> {
     }
 }
 
-/// 生成一条 Single 规则对应的 PREROUTING + POSTROUTING 行
-fn append_single_rule(s: &mut String, rule: &Rule, ip: &str, version: &IpVersion) {
-    let family = match version {
+fn family(version: &IpVersion) -> &'static str {
+    match version {
         IpVersion::Ipv4 => "ip",
         IpVersion::Ipv6 => "ip6",
         IpVersion::All => unreachable!(),
-    };
+    }
+}
 
-    let proto = match rule.protocol {
-        Protocol::Tcp => "tcp dport".to_string(),
-        Protocol::Udp => "udp dport".to_string(),
-        Protocol::All => "meta l4proto { tcp, udp } th dport".to_string(),
-    };
+fn proto_expr(protocol: &Protocol) -> &'static str {
+    match protocol {
+        Protocol::Tcp => "tcp",
+        Protocol::Udp => "udp",
+        Protocol::All => "meta l4proto { tcp, udp } th",
+    }
+}
 
-    // IPv6 地址需要用方括号包裹
-    let dnat_addr = match version {
-        IpVersion::Ipv6 => format!("[{}]:{}", ip, rule.dport),
-        _ => format!("{}:{}", ip, rule.dport),
-    };
-
-    let addr_match = match version {
+fn addr_match(version: &IpVersion, ip: &str) -> String {
+    match version {
         IpVersion::Ipv4 => format!("ip daddr {}", ip),
         IpVersion::Ipv6 => format!("ip6 daddr {}", ip),
         IpVersion::All => unreachable!(),
+    }
+}
+
+/// 生成 Single 规则的 PREROUTING + POSTROUTING
+fn append_single(
+    s: &mut String,
+    sport: u16,
+    dport: u16,
+    ip: &str,
+    protocol: &Protocol,
+    version: &IpVersion,
+    comment: &Option<String>,
+) {
+    let fam = family(version);
+    let proto = proto_expr(protocol);
+    let dnat_addr = fmt_dnat_addr(version, ip, dport);
+    let addr = addr_match(version, ip);
+    let cmt = comment
+        .as_deref()
+        .unwrap_or("single")
+        .replace('"', "'");
+
+    s.push_str(&format!(
+        "add rule {fam} {TABLE} PREROUTING ct state new {proto} dport {sport} counter dnat to {dnat_addr} comment \"{cmt}\"\n"
+    ));
+    s.push_str(&format!(
+        "add rule {fam} {TABLE} POSTROUTING ct state new {addr} {proto} dport {dport} counter masquerade comment \"{cmt}\"\n"
+    ));
+}
+
+/// 生成 Range 规则的 PREROUTING + POSTROUTING
+fn append_range(
+    s: &mut String,
+    sport_start: u16,
+    sport_end: u16,
+    dport_start: u16,
+    dport_end: u16,
+    ip: &str,
+    protocol: &Protocol,
+    version: &IpVersion,
+    comment: &Option<String>,
+) {
+    let fam = family(version);
+    let proto = proto_expr(protocol);
+    let addr = addr_match(version, ip);
+    let cmt = comment
+        .as_deref()
+        .unwrap_or("range")
+        .replace('"', "'");
+
+    // 端口段 DNAT：IPv6 地址需方括号
+    let dnat_addr = match version {
+        IpVersion::Ipv6 => format!("[{}]:{}-{}", ip, dport_start, dport_end),
+        _ => format!("{}:{}-{}", ip, dport_start, dport_end),
     };
 
-    let comment = rule
-        .comment
-        .clone()
-        .unwrap_or_else(|| format!("{}→{}:{}", rule.sport, rule.target, rule.dport));
-
-    // PREROUTING: DNAT
     s.push_str(&format!(
-        "add rule {family} {TABLE} PREROUTING ct state new {proto} {sport} counter dnat to {dnat_addr} comment \"{comment}\"\n",
-        sport = rule.sport,
+        "add rule {fam} {TABLE} PREROUTING ct state new {proto} dport {sport_start}-{sport_end} counter dnat to {dnat_addr} comment \"{cmt}\"\n"
     ));
-
-    // POSTROUTING: SNAT (masquerade 自动使用出口 IP)
     s.push_str(&format!(
-        "add rule {family} {TABLE} POSTROUTING ct state new {addr_match} {proto} {dport} counter masquerade comment \"{comment}\"\n",
-        dport = rule.dport,
+        "add rule {fam} {TABLE} POSTROUTING ct state new {addr} {proto} dport {dport_start}-{dport_end} counter masquerade comment \"{cmt}\"\n"
     ));
+}
+
+/// 格式化 DNAT 目标地址（IPv6 需方括号）
+fn fmt_dnat_addr(version: &IpVersion, ip: &str, port: u16) -> String {
+    match version {
+        IpVersion::Ipv6 => format!("[{}]:{}", ip, port),
+        _ => format!("{}:{}", ip, port),
+    }
 }

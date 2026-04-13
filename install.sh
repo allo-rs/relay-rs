@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ── 配置 ──────────────────────────────────────────────────────────
+REPO="your-github-username/relay-rs"   # ← 替换为你的仓库
+INSTALL_DIR="/usr/local/bin"
+CONFIG_DIR="/etc/relay-rs"
+SERVICE_FILE="/etc/systemd/system/relay-rs.service"
+BINARY_NAME="relay-rs"
+
+# ── 颜色输出 ──────────────────────────────────────────────────────
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
+warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
+error() { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
+
+# ── 检查 root ─────────────────────────────────────────────────────
+[[ $EUID -ne 0 ]] && error "请以 root 权限运行: sudo bash install.sh"
+
+# ── 检测架构 ──────────────────────────────────────────────────────
+ARCH=$(uname -m)
+case "$ARCH" in
+  x86_64)         ARTIFACT="relay-rs-x86_64" ;;
+  aarch64|arm64)  ARTIFACT="relay-rs-aarch64" ;;
+  *)              error "不支持的架构: $ARCH" ;;
+esac
+
+info "检测到架构: $ARCH，使用产物: $ARTIFACT"
+
+# ── 获取最新版本号 ─────────────────────────────────────────────────
+info "获取最新版本..."
+LATEST=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
+  | grep '"tag_name"' | cut -d'"' -f4)
+[[ -z "$LATEST" ]] && error "无法获取最新版本，请检查仓库地址或网络"
+info "最新版本: $LATEST"
+
+# ── 下载二进制 ────────────────────────────────────────────────────
+DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST}/${ARTIFACT}"
+TMP_BIN=$(mktemp)
+
+info "下载 $DOWNLOAD_URL ..."
+curl -fsSL -o "$TMP_BIN" "$DOWNLOAD_URL" || error "下载失败"
+chmod +x "$TMP_BIN"
+mv "$TMP_BIN" "${INSTALL_DIR}/${BINARY_NAME}"
+
+info "已安装到 ${INSTALL_DIR}/${BINARY_NAME}"
+
+# ── 初始化配置目录 ────────────────────────────────────────────────
+mkdir -p "$CONFIG_DIR"
+
+if [[ ! -f "${CONFIG_DIR}/relay.toml" ]]; then
+  cat > "${CONFIG_DIR}/relay.toml" <<'EOF'
+# relay-rs 配置文件
+# 文档: https://github.com/your-github-username/relay-rs
+
+# 单端口转发示例（删除注释后生效）
+# [[rules]]
+# type = "single"
+# sport = 10000
+# dport = 443
+# target = "example.com"
+# protocol = "tcp"
+# ip_version = "ipv4"
+# comment = "示例规则"
+EOF
+  info "已创建配置文件模板: ${CONFIG_DIR}/relay.toml"
+  warn "请编辑配置文件后启动服务: $EDITOR ${CONFIG_DIR}/relay.toml"
+else
+  warn "配置文件已存在，跳过创建: ${CONFIG_DIR}/relay.toml"
+fi
+
+# ── 安装 systemd 服务 ─────────────────────────────────────────────
+cat > "$SERVICE_FILE" <<EOF
+[Unit]
+Description=relay-rs NAT forwarding daemon
+After=network.target
+
+[Service]
+ExecStart=${INSTALL_DIR}/${BINARY_NAME} --config ${CONFIG_DIR}/relay.toml
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable relay-rs
+
+info "systemd 服务已安装并设置开机自启"
+info ""
+info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+info "安装完成！"
+info ""
+info "下一步："
+info "  1. 编辑配置文件:  vim ${CONFIG_DIR}/relay.toml"
+info "  2. 启动服务:      systemctl start relay-rs"
+info "  3. 查看日志:      journalctl -u relay-rs -f"
+info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

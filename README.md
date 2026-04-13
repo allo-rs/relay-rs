@@ -20,11 +20,18 @@ dnf install nftables
 
 ## 安装
 
-```bash
-# 从源码编译（需要 Rust 工具链）
-cargo build --release
+### 一键安装（推荐）
 
-# 复制到系统路径
+```bash
+sudo bash <(curl -fsSL https://raw.githubusercontent.com/your-github-username/relay-rs/main/install.sh)
+```
+
+自动完成：检测架构 → 下载最新二进制 → 创建配置模板 → 安装 systemd 服务。
+
+### 从源码编译
+
+```bash
+cargo build --release
 sudo cp target/release/relay-rs /usr/local/bin/
 ```
 
@@ -40,23 +47,33 @@ sudo vim /etc/relay-rs/relay.toml
 
 ### 配置格式
 
-```toml
-# 每条规则用 [[rules]] 块声明
+通过 `type` 字段选择规则类型。
 
+#### 单端口转发（`type = "single"`）
+
+```toml
 [[rules]]
+type = "single"
 sport = 10000          # 本机监听端口
 dport = 443            # 目标端口
 target = "example.com" # 目标域名或 IP（支持 IPv4/IPv6）
 protocol = "tcp"       # tcp | udp | all（默认 all）
 ip_version = "ipv4"    # ipv4 | ipv6 | all（默认 ipv4）
 comment = "可选备注"   # 会写入 nftables 规则注释
+```
 
+#### 端口段转发（`type = "range"`）
+
+```toml
 [[rules]]
-sport = 51820
-dport = 51820
+type = "range"
+sport_start = 10000    # 本机端口段起始
+sport_end = 10100      # 本机端口段结束
+dport_start = 20000    # 目标端口段起始（省略则与 sport_start 相同）
 target = "10.0.0.1"
-protocol = "udp"
+protocol = "tcp"
 ip_version = "ipv4"
+comment = "端口段 10000-10100 → 10.0.0.1:20000-20100"
 ```
 
 ## 用法
