@@ -1,7 +1,7 @@
 use std::fs;
 use std::process::Command;
 
-use crate::config::{BlockRule, Chain, ForwardRule, Listen, Proto, Target};
+use crate::config::{Balance, BlockRule, Chain, ForwardRule, Listen, Proto, Target};
 
 const NFT_BIN: &str = "/usr/sbin/nft";
 const SCRIPT_DIR: &str = "/etc/relay-rs";
@@ -11,11 +11,16 @@ const FILTER_TABLE: &str = "relay-filter";
 
 // ── 已解析的转发规则（含 DNS 结果） ──────────────────────────────
 
+pub struct ResolvedTarget {
+    pub target: Target,
+    pub ip: String,
+}
+
 pub struct ResolvedForward {
     pub rule: ForwardRule,
     pub listen: Listen,
-    pub target: Target,
-    pub ip: String,
+    /// 健康检查后存活的目标列表（单目标或多目标）
+    pub targets: Vec<ResolvedTarget>,
 }
 
 // ── 应用规则 ─────────────────────────────────────────────────────
@@ -75,12 +80,10 @@ pub fn build_script(forwards: &[ResolvedForward], blocks: &[BlockRule]) -> Strin
         s.push('\n');
     }
 
-    // 转发规则
     for r in forwards {
         append_forward(&mut s, r);
     }
 
-    // Block 规则
     for b in blocks {
         append_block(&mut s, b);
     }
@@ -91,59 +94,122 @@ pub fn build_script(forwards: &[ResolvedForward], blocks: &[BlockRule]) -> Strin
 // ── 转发规则生成 ──────────────────────────────────────────────────
 
 fn append_forward(s: &mut String, r: &ResolvedForward) {
-    let is_ipv6 = r.ip.contains(':');
-    let fam = if is_ipv6 { "ip6" } else { "ip" };
+    if r.targets.is_empty() { return; }
+
+    let cmt   = r.rule.comment.as_deref().unwrap_or("forward").replace('"', "'");
     let proto = proto_expr(&r.rule.proto);
-    let cmt = r.rule.comment.as_deref().unwrap_or("forward").replace('"', "'");
+
+    // 以第一个目标的地址族为准（所有目标应同族）
+    let is_ipv6 = r.targets[0].ip.contains(':');
+    let fam     = if is_ipv6 { "ip6" } else { "ip" };
     let addr_kw = if is_ipv6 { "ip6 daddr" } else { "ip daddr" };
 
+    // 速率限制：先插入 drop 规则，超速数据包直接丢弃
+    if let Some(rate) = &r.rule.rate_limit {
+        let sport = listen_range_expr(&r.listen);
+        s.push_str(&format!(
+            "add rule {fam} {NAT_TABLE} PREROUTING ct state new {proto} dport {sport} \
+             limit rate over {rate} counter drop comment \"{cmt}\"\n"
+        ));
+    }
+
+    match r.targets.len() {
+        1 => append_single(s, r, &r.targets[0], fam, proto, addr_kw, &cmt, is_ipv6),
+        _ => append_multi(s, r, fam, proto, addr_kw, &cmt, is_ipv6),
+    }
+}
+
+/// 单目标转发（原有逻辑）
+fn append_single(
+    s: &mut String,
+    r: &ResolvedForward,
+    t: &ResolvedTarget,
+    fam: &str, proto: &str, addr_kw: &str, cmt: &str, is_ipv6: bool,
+) {
     match &r.listen {
         Listen::Single(sport) => {
-            let dnat = fmt_addr(is_ipv6, &r.ip, r.target.port_start);
+            let dnat = fmt_addr(is_ipv6, &t.ip, t.target.port_start);
             s.push_str(&format!(
-                "add rule {fam} {NAT_TABLE} PREROUTING ct state new {proto} dport {sport} counter dnat to {dnat} comment \"{cmt}\"\n"
+                "add rule {fam} {NAT_TABLE} PREROUTING ct state new {proto} dport {sport} \
+                 counter dnat to {dnat} comment \"{cmt}\"\n"
             ));
             s.push_str(&format!(
-                "add rule {fam} {NAT_TABLE} POSTROUTING ct state new {addr_kw} {} {proto} dport {} counter masquerade comment \"{cmt}\"\n",
-                r.ip, r.target.port_start
+                "add rule {fam} {NAT_TABLE} POSTROUTING ct state new {addr_kw} {} {proto} dport {} \
+                 counter masquerade comment \"{cmt}\"\n",
+                t.ip, t.target.port_start
             ));
         }
         Listen::Range(sport_start, sport_end) => {
-            let dport_start = r.target.port_start;
-            let dport_end = dport_start + r.listen.size();
+            let dport_end = t.target.port_start + r.listen.size();
             let dnat = if is_ipv6 {
-                format!("[{}]:{}-{}", r.ip, dport_start, dport_end)
+                format!("[{}]:{}-{}", t.ip, t.target.port_start, dport_end)
             } else {
-                format!("{}:{}-{}", r.ip, dport_start, dport_end)
+                format!("{}:{}-{}", t.ip, t.target.port_start, dport_end)
             };
             s.push_str(&format!(
-                "add rule {fam} {NAT_TABLE} PREROUTING ct state new {proto} dport {sport_start}-{sport_end} counter dnat to {dnat} comment \"{cmt}\"\n"
+                "add rule {fam} {NAT_TABLE} PREROUTING ct state new {proto} dport {sport_start}-{sport_end} \
+                 counter dnat to {dnat} comment \"{cmt}\"\n"
             ));
             s.push_str(&format!(
-                "add rule {fam} {NAT_TABLE} POSTROUTING ct state new {addr_kw} {} {proto} dport {dport_start}-{dport_end} counter masquerade comment \"{cmt}\"\n",
-                r.ip
+                "add rule {fam} {NAT_TABLE} POSTROUTING ct state new {addr_kw} {} {proto} dport {}-{} \
+                 counter masquerade comment \"{cmt}\"\n",
+                t.ip, t.target.port_start, dport_end
             ));
         }
+    }
+}
+
+/// 多目标负载均衡（numgen），仅支持单端口
+fn append_multi(
+    s: &mut String,
+    r: &ResolvedForward,
+    fam: &str, proto: &str, addr_kw: &str, cmt: &str, is_ipv6: bool,
+) {
+    let sport = match &r.listen {
+        Listen::Single(p) => *p,
+        Listen::Range(_, _) => {
+            log::warn!("多目标负载均衡不支持端口段，跳过规则: {}", r.rule.listen);
+            return;
+        }
+    };
+
+    let n    = r.targets.len();
+    let mode = match r.rule.balance.as_ref().unwrap_or(&Balance::RoundRobin) {
+        Balance::RoundRobin => "inc",
+        Balance::Random     => "random",
+    };
+
+    // numgen map 条目：0 : IP:PORT, 1 : IP:PORT, ...
+    let entries = r.targets.iter().enumerate()
+        .map(|(i, t)| format!("{} : {}", i, fmt_addr(is_ipv6, &t.ip, t.target.port_start)))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    s.push_str(&format!(
+        "add rule {fam} {NAT_TABLE} PREROUTING ct state new {proto} dport {sport} \
+         counter dnat to numgen {mode} mod {n} map {{ {entries} }} comment \"{cmt}\"\n"
+    ));
+
+    // 每个目标各自添加 masquerade
+    for t in &r.targets {
+        s.push_str(&format!(
+            "add rule {fam} {NAT_TABLE} POSTROUTING ct state new {addr_kw} {} {proto} dport {} \
+             counter masquerade comment \"{cmt}\"\n",
+            t.ip, t.target.port_start
+        ));
     }
 }
 
 // ── Block 规则生成 ────────────────────────────────────────────────
 
 fn append_block(s: &mut String, b: &BlockRule) {
-    let fam = if b.ipv6 { "ip6" } else { "ip" };
-    let chain = match b.chain {
-        Chain::Input => "INPUT",
-        Chain::Forward => "FORWARD",
-    };
-    let cmt = b.comment.as_deref().unwrap_or("block").replace('"', "'");
+    let fam   = if b.ipv6 { "ip6" } else { "ip" };
+    let chain = match b.chain { Chain::Input => "INPUT", Chain::Forward => "FORWARD" };
+    let cmt   = b.comment.as_deref().unwrap_or("block").replace('"', "'");
 
     let mut conds: Vec<String> = Vec::new();
 
-    let (saddr, daddr) = if b.ipv6 {
-        ("ip6 saddr", "ip6 daddr")
-    } else {
-        ("ip saddr", "ip daddr")
-    };
+    let (saddr, daddr) = if b.ipv6 { ("ip6 saddr", "ip6 daddr") } else { ("ip saddr", "ip daddr") };
 
     if let Some(ip) = &b.src { conds.push(format!("{} {}", saddr, ip)); }
     if let Some(ip) = &b.dst { conds.push(format!("{} {}", daddr, ip)); }
@@ -164,12 +230,7 @@ fn append_block(s: &mut String, b: &BlockRule) {
         }
     }
 
-    let cond_str = if conds.is_empty() {
-        String::new()
-    } else {
-        format!("{} ", conds.join(" "))
-    };
-
+    let cond_str = if conds.is_empty() { String::new() } else { format!("{} ", conds.join(" ")) };
     s.push_str(&format!(
         "add rule {fam} {FILTER_TABLE} {chain} {cond_str}drop comment \"{cmt}\"\n"
     ));
@@ -186,9 +247,12 @@ fn proto_expr(proto: &Proto) -> &'static str {
 }
 
 fn fmt_addr(is_ipv6: bool, ip: &str, port: u16) -> String {
-    if is_ipv6 {
-        format!("[{}]:{}", ip, port)
-    } else {
-        format!("{}:{}", ip, port)
+    if is_ipv6 { format!("[{}]:{}", ip, port) } else { format!("{}:{}", ip, port) }
+}
+
+fn listen_range_expr(listen: &Listen) -> String {
+    match listen {
+        Listen::Single(p)    => p.to_string(),
+        Listen::Range(s, e)  => format!("{}-{}", s, e),
     }
 }
