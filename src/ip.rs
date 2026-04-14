@@ -20,10 +20,10 @@ fn rt() -> &'static tokio::runtime::Runtime {
 /// 全局复用的 resolver，hickory 内置 TTL 缓存自动生效
 fn resolver() -> &'static TokioAsyncResolver {
     RESOLVER.get_or_init(|| {
-        // 在 tokio 上下文内构造，resolver 会捕获当前 runtime handle
-        rt().block_on(async {
-            TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
-        })
+        // TokioAsyncResolver::tokio() 是同步构造函数，只需 enter() 提供 runtime 上下文
+        // 避免在 block_on 内部嵌套调用 block_on
+        let _guard = rt().enter();
+        TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
     })
 }
 
