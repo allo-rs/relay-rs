@@ -130,9 +130,14 @@ fn append_single(
     match &r.listen {
         Listen::Single(sport) => {
             let dnat = fmt_addr(is_ipv6, &t.ip, t.target.port_start);
+            // 流量统计专用规则：无状态过滤，统计所有经过该端口的入向数据包
+            s.push_str(&format!(
+                "add rule {fam} {NAT_TABLE} PREROUTING {proto} dport {sport} \
+                 counter comment \"{cmt}\"\n"
+            ));
             s.push_str(&format!(
                 "add rule {fam} {NAT_TABLE} PREROUTING ct state new {proto} dport {sport} \
-                 counter dnat to {dnat} comment \"{cmt}\"\n"
+                 dnat to {dnat} comment \"{cmt}\"\n"
             ));
             s.push_str(&format!(
                 "add rule {fam} {NAT_TABLE} POSTROUTING ct state new {addr_kw} {} {proto} dport {} \
@@ -147,9 +152,14 @@ fn append_single(
             } else {
                 format!("{}:{}-{}", t.ip, t.target.port_start, dport_end)
             };
+            // 流量统计专用规则：无状态过滤，统计所有经过该端口段的入向数据包
+            s.push_str(&format!(
+                "add rule {fam} {NAT_TABLE} PREROUTING {proto} dport {sport_start}-{sport_end} \
+                 counter comment \"{cmt}\"\n"
+            ));
             s.push_str(&format!(
                 "add rule {fam} {NAT_TABLE} PREROUTING ct state new {proto} dport {sport_start}-{sport_end} \
-                 counter dnat to {dnat} comment \"{cmt}\"\n"
+                 dnat to {dnat} comment \"{cmt}\"\n"
             ));
             s.push_str(&format!(
                 "add rule {fam} {NAT_TABLE} POSTROUTING ct state new {addr_kw} {} {proto} dport {}-{} \
@@ -186,9 +196,14 @@ fn append_multi(
         .collect::<Vec<_>>()
         .join(", ");
 
+    // 流量统计专用规则：无状态过滤，统计所有经过该端口的入向数据包
+    s.push_str(&format!(
+        "add rule {fam} {NAT_TABLE} PREROUTING {proto} dport {sport} \
+         counter comment \"{cmt}\"\n"
+    ));
     s.push_str(&format!(
         "add rule {fam} {NAT_TABLE} PREROUTING ct state new {proto} dport {sport} \
-         counter dnat to numgen {mode} mod {n} map {{ {entries} }} comment \"{cmt}\"\n"
+         dnat to numgen {mode} mod {n} map {{ {entries} }} comment \"{cmt}\"\n"
     ));
 
     // 每个目标各自添加 masquerade

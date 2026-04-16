@@ -430,6 +430,8 @@ fn parse_counters(text: &str) -> Vec<CounterEntry> {
         if trimmed.starts_with("chain ") { in_prerouting = false; continue; }
         if !in_prerouting { continue; }
         if !trimmed.contains("counter packets") { continue; }
+        // 跳过限速丢包规则（limit rate ... drop），仅统计流量 counter 专用规则
+        if trimmed.contains("limit rate") { continue; }
 
         entries.push(CounterEntry {
             packets: extract_u64(trimmed, "packets"),
