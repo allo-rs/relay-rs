@@ -139,7 +139,18 @@ fn probe_target(to_str: &str, ipv6: bool, proto: &Proto) {
             let t0 = std::time::Instant::now();
             match TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
                 Ok(_)  => println!("  ✓  {}  (→ {})  {}ms", to_str, ip, t0.elapsed().as_millis()),
-                Err(e) => println!("  ✗  {}  (→ {})  {}", to_str, ip, e),
+                Err(e) => {
+                    use std::io::ErrorKind::*;
+                    let reason = match e.kind() {
+                        ConnectionRefused  => "端口未开放".to_string(),
+                        TimedOut           => format!("连接超时（{}ms）", t0.elapsed().as_millis()),
+                        NetworkUnreachable => "网络不可达".to_string(),
+                        HostUnreachable    => "主机不可达".to_string(),
+                        ConnectionReset    => "连接被重置".to_string(),
+                        _                  => e.to_string(),
+                    };
+                    println!("  ✗  {}  (→ {})  {}", to_str, ip, reason);
+                }
             }
         }
         Err(e) => println!("  ✗  {} — 地址解析失败: {}", to_str, e),
