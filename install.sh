@@ -92,6 +92,7 @@ After=network.target
 ExecStart=${INSTALL_DIR}/${BINARY_NAME} daemon --config ${CONFIG_DIR}/relay.toml
 Restart=on-failure
 RestartSec=5
+LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target
