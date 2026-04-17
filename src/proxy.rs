@@ -392,6 +392,10 @@ async fn relay(
         }
     };
 
+    // 双向开启 TCP keepalive，让 OS 探测死连接（断网/崩溃等）
+    apply_keepalive(&client);
+    apply_keepalive(&server);
+
     let result = do_relay(&mut client, &mut server).await;
 
     // 更新统计（bytes_in/out/connections，写入 /tmp/relay-rs.stats）
@@ -640,4 +644,34 @@ fn ip_matches(ip: std::net::IpAddr, spec: &str) -> bool {
         }
         _ => false, // 地址族不匹配
     }
+}
+
+/// 对 TcpStream 开启 OS 级 TCP keepalive：
+/// 60s 空闲后开始探测，每 10s 一次，连续 3 次无响应则断开。
+fn apply_keepalive(stream: &TcpStream) {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        let fd = stream.as_raw_fd();
+        unsafe {
+            let on: libc::c_int = 1;
+            libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_KEEPALIVE,
+                &on as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t);
+            let idle: libc::c_int = 60;
+            libc::setsockopt(fd, libc::IPPROTO_TCP, libc::TCP_KEEPIDLE,
+                &idle as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t);
+            let intvl: libc::c_int = 10;
+            libc::setsockopt(fd, libc::IPPROTO_TCP, libc::TCP_KEEPINTVL,
+                &intvl as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t);
+            let cnt: libc::c_int = 3;
+            libc::setsockopt(fd, libc::IPPROTO_TCP, libc::TCP_KEEPCNT,
+                &cnt as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t);
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = stream;
 }
