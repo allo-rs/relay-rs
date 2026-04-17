@@ -561,7 +561,11 @@ mod zero_copy {
                 if n < 0 {
                     let e = io::Error::last_os_error();
                     if e.kind() == io::ErrorKind::WouldBlock {
-                        src.readable().await?;
+                        match tokio::time::timeout(super::TCP_IDLE_TIMEOUT, src.readable()).await {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => return Err(e),
+                            Err(_) => return Err(io::Error::new(io::ErrorKind::TimedOut, "TCP 空闲超时")),
+                        }
                         continue;
                     }
                     return Err(e);
