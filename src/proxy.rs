@@ -395,12 +395,16 @@ async fn relay(
         Err(e) => { log::warn!("DNS 解析 {}:{} 失败: {}", target.host, target_port, e); return; }
     };
 
-    let mut server = match TcpStream::connect(target_addr).await {
-        Ok(s) => s,
-        Err(e) => {
-            // 连接失败时使 DNS 缓存失效，下次重新解析
+    let mut server = match timeout(Duration::from_secs(10), TcpStream::connect(target_addr)).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
             dns_cache.invalidate(&target.host, target_port, rule.ipv6);
             log::warn!("连接 {} ({}) 失败: {}", to_str, target_addr, e);
+            return;
+        }
+        Err(_) => {
+            dns_cache.invalidate(&target.host, target_port, rule.ipv6);
+            log::warn!("连接 {} ({}) 超时（10s）", to_str, target_addr);
             return;
         }
     };
@@ -456,11 +460,12 @@ async fn do_relay(client: &mut TcpStream, server: &mut TcpStream) -> io::Result<
     let (mut sr, mut sw) = server.split();
     let c2s = AtomicU64::new(0);
     let s2c = AtomicU64::new(0);
-    let result = tokio::try_join!(
+    // 忽略出错原因（超时/断开均属正常），始终返回已传字节数
+    let _ = tokio::try_join!(
         copy_with_idle(&mut cr, &mut sw, &c2s),
         copy_with_idle(&mut sr, &mut cw, &s2c),
     );
-    result.map(|_| (c2s.load(Ordering::Relaxed), s2c.load(Ordering::Relaxed)))
+    Ok((c2s.load(Ordering::Relaxed), s2c.load(Ordering::Relaxed)))
 }
 
 /// 单方向带空闲超时的 copy，边传边累加到 counter
@@ -511,12 +516,12 @@ mod zero_copy {
         let c2s = AtomicU64::new(0);
         let s2c = AtomicU64::new(0);
 
-        // try_join!：出错立即取消另一方向，正常 EOF 则等对端排空，避免丢失回包。
-        let result = tokio::try_join!(
+        // 忽略出错原因，始终返回已传字节数；EINVAL 由调用方匹配用于回退 copy 模式
+        let _ = tokio::try_join!(
             splice_half(client, server, c_fd, s_fd, c2s_rd.as_raw_fd(), c2s_wr.as_raw_fd(), &c2s),
             splice_half(server, client, s_fd, c_fd, s2c_rd.as_raw_fd(), s2c_wr.as_raw_fd(), &s2c),
         );
-        result.map(|_| (c2s.load(Ordering::Relaxed), s2c.load(Ordering::Relaxed)))
+        Ok((c2s.load(Ordering::Relaxed), s2c.load(Ordering::Relaxed)))
     }
 
     /// 单方向 splice 循环：src_fd → pipe → dst_fd，边传边累加 counter
