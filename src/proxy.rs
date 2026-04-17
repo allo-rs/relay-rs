@@ -190,9 +190,14 @@ async fn listen_single_tcp(
 ) {
     let bind = format!("0.0.0.0:{}", port);
 
-    let listener = match TcpListener::bind(&bind).await {
-        Ok(l) => l,
-        Err(e) => { log::error!("TCP 监听 {} 失败: {}", bind, e); return; }
+    let listener = loop {
+        match TcpListener::bind(&bind).await {
+            Ok(l) => break l,
+            Err(e) => {
+                log::error!("TCP 监听 {} 失败: {}，5s 后重试", bind, e);
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        }
     };
 
     let label = rule.comment.as_deref().unwrap_or(&rule.listen).to_string();
@@ -239,9 +244,14 @@ async fn listen_single_tcp(
 async fn listen_udp_rule(rule: ForwardRule, port: u16, port_offset: u16, dns_cache: DnsCache) {
     let bind = format!("0.0.0.0:{}", port);
 
-    let local_sock = match UdpSocket::bind(&bind).await {
-        Ok(s) => Arc::new(s),
-        Err(e) => { log::error!("UDP 监听 {} 失败: {}", bind, e); return; }
+    let local_sock = loop {
+        match UdpSocket::bind(&bind).await {
+            Ok(s) => break Arc::new(s),
+            Err(e) => {
+                log::error!("UDP 监听 {} 失败: {}，5s 后重试", bind, e);
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        }
     };
 
     let label = rule.comment.as_deref().unwrap_or(&rule.listen).to_string();
