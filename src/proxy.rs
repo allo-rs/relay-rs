@@ -436,14 +436,13 @@ async fn do_relay(client: &mut TcpStream, server: &mut TcpStream) -> io::Result<
             result => return result,
         }
     }
-    // copy 路径（非 Linux，或 splice 回退）
+    // copy 路径（非 Linux，或 splice 回退）brutal shutdown 同上
     let (mut cr, mut cw) = client.split();
     let (mut sr, mut sw) = server.split();
-    let (c2s, s2c) = tokio::try_join!(
-        copy_with_idle(&mut cr, &mut sw),
-        copy_with_idle(&mut sr, &mut cw),
-    )?;
-    Ok((c2s, s2c))
+    tokio::select! {
+        r = copy_with_idle(&mut cr, &mut sw) => r.map(|n| (n, 0)),
+        r = copy_with_idle(&mut sr, &mut cw) => r.map(|n| (0, n)),
+    }
 }
 
 /// 单方向带空闲超时的 copy，EOF 时主动 shutdown 写端
@@ -491,12 +490,13 @@ mod zero_copy {
         let c_fd = client.as_raw_fd();
         let s_fd = server.as_raw_fd();
 
-        let (c2s, s2c) = tokio::join!(
-            splice_half(client, server, c_fd, s_fd, c2s_rd.as_raw_fd(), c2s_wr.as_raw_fd()),
-            splice_half(server, client, s_fd, c_fd, s2c_rd.as_raw_fd(), s2c_wr.as_raw_fd()),
-        );
-
-        Ok((c2s?, s2c?))
+        // brutal shutdown：任一方向关闭立即取消另一方向，连接不再悬挂
+        tokio::select! {
+            r = splice_half(client, server, c_fd, s_fd, c2s_rd.as_raw_fd(), c2s_wr.as_raw_fd()) =>
+                r.map(|n| (n, 0)),
+            r = splice_half(server, client, s_fd, c_fd, s2c_rd.as_raw_fd(), s2c_wr.as_raw_fd()) =>
+                r.map(|n| (0, n)),
+        }
     }
 
     /// 单方向 splice 循环：src_fd → pipe → dst_fd
@@ -524,7 +524,11 @@ mod zero_copy {
                 if n == 0 { return Ok(total); }
                 if n < 0 {
                     let e = io::Error::last_os_error();
-                    if e.kind() == io::ErrorKind::WouldBlock { continue; }
+                    if e.kind() == io::ErrorKind::WouldBlock {
+                        // 显式等下一个可读事件，避免 tokio tick 误判
+                        src.readable().await?;
+                        continue;
+                    }
                     return Err(e);
                 }
                 break n as usize;
@@ -558,8 +562,20 @@ mod zero_copy {
         let mut fds = [0i32; 2];
         let ret = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_NONBLOCK | libc::O_CLOEXEC) };
         if ret < 0 { return Err(io::Error::last_os_error()); }
-        Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
+        let (rd, wr) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+        // 尝试将管道容量扩大到系统上限（/proc/sys/fs/pipe-max-size，通常 1MB），
+        // 失败时静默忽略，内核默认 64KB 仍可正常工作。
+        unsafe { libc::fcntl(wr.as_raw_fd(), libc::F_SETPIPE_SZ, PIPE_MAX_SIZE as libc::c_int) };
+        Ok((rd, wr))
     }
+
+    /// 尝试读取系统允许的最大 pipe size；读取失败时回退到内核默认值 65536。
+    static PIPE_MAX_SIZE: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| {
+        std::fs::read_to_string("/proc/sys/fs/pipe-max-size")
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(65536)
+    });
 }
 
 // ── 健康检查后台任务 ──────────────────────────────────────────────
