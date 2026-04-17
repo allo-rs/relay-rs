@@ -3,6 +3,17 @@ set -euo pipefail
 
 # ── 配置 ──────────────────────────────────────────────────────────
 REPO="allo-rs/relay-rs"
+INSTALL_DIR="/usr/local/bin"
+CONFIG_DIR="/etc/relay-rs"
+SERVICE_FILE="/etc/systemd/system/relay-rs.service"
+BINARY_NAME="relay-rs"
+
+# ── 颜色输出 ──────────────────────────────────────────────────────
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
+warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
+error() { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
+
 # 国内访问 GitHub 慢时可设置代理，留空则直连
 # 例: GITHUB_PROXY="https://gh-proxy.org/"
 _PROXY_DEFAULT="https://gh-proxy.org/"
@@ -15,16 +26,6 @@ if [[ -z "${GITHUB_PROXY+x}" ]]; then
     GITHUB_PROXY="$_PROXY_DEFAULT"
   fi
 fi
-INSTALL_DIR="/usr/local/bin"
-CONFIG_DIR="/etc/relay-rs"
-SERVICE_FILE="/etc/systemd/system/relay-rs.service"
-BINARY_NAME="relay-rs"
-
-# ── 颜色输出 ──────────────────────────────────────────────────────
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
-info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
-warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
-error() { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 
 # ── 检查 root ─────────────────────────────────────────────────────
 [[ $EUID -ne 0 ]] && error "请以 root 权限运行: bash install.sh"
