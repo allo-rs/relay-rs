@@ -98,7 +98,7 @@ fn run_ctl(cmd: Command, config: &str, interval: u64) {
         Command::Log     => journalctl(),
         Command::Config  => edit_config(config),
         Command::Reload  => { edit_config(config); systemctl("restart"); }
-        Command::Stats   => ctl::stats(),
+        Command::Stats   => ctl::stats(config),
         Command::Mode    => {
             let cfg = config::load(config).unwrap_or_default();
             match ctl::mode_cmd(cfg, config) {
@@ -303,7 +303,7 @@ fn run_menu(config: &str) {
                 }
             }
             5 => { // 流量统计
-                ctl::stats();
+                ctl::stats(config);
                 pause();
             }
             6 => { // 切换模式

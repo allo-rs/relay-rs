@@ -579,7 +579,7 @@ fn edit_block(rule: BlockRule, theme: &ColorfulTheme) -> Result<BlockRule, Box<d
 
 // ── rr stats ─────────────────────────────────────────────────────
 
-pub fn stats() {
+pub fn stats(config_path: &str) {
     let mut found = false;
     for family in ["ip", "ip6"] {
         let output = std::process::Command::new("nft")
@@ -614,25 +614,30 @@ pub fn stats() {
         println!("暂无统计数据（服务是否已启动？）");
     }
 
-    // relay 用户态代理模式统计
-    if let Ok(content) = std::fs::read_to_string("/tmp/relay-rs.stats") {
-        if let Ok(map) = serde_json::from_str::<std::collections::HashMap<String, serde_json::Value>>(&content) {
-            if !map.is_empty() {
-                println!();
-                println!("Relay 模式统计:");
-                println!("{:<20} {:>12} {:>12} {:>10}", "监听端口", "流入", "流出", "连接数");
-                println!("{}", "─".repeat(58));
-                for (port, val) in &map {
-                    let conns  = val["total_conns"].as_u64().unwrap_or(0);
-                    let b_in   = val["bytes_in"].as_u64().unwrap_or(0);
-                    let b_out  = val["bytes_out"].as_u64().unwrap_or(0);
-                    println!(
-                        "{:<20} {:>12} {:>12} {:>10}",
-                        port,
-                        format_bytes(b_in),
-                        format_bytes(b_out),
-                        conns,
-                    );
+    // relay 用户态代理模式统计（仅 relay 模式下显示）
+    let is_relay = crate::config::load(config_path)
+        .map(|c| c.mode == crate::config::ForwardMode::Relay)
+        .unwrap_or(false);
+    if is_relay {
+        if let Ok(content) = std::fs::read_to_string("/tmp/relay-rs.stats") {
+            if let Ok(map) = serde_json::from_str::<std::collections::HashMap<String, serde_json::Value>>(&content) {
+                if !map.is_empty() {
+                    println!();
+                    println!("Relay 模式统计:");
+                    println!("{:<20} {:>12} {:>12} {:>10}", "监听端口", "流入", "流出", "连接数");
+                    println!("{}", "─".repeat(58));
+                    for (port, val) in &map {
+                        let conns  = val["total_conns"].as_u64().unwrap_or(0);
+                        let b_in   = val["bytes_in"].as_u64().unwrap_or(0);
+                        let b_out  = val["bytes_out"].as_u64().unwrap_or(0);
+                        println!(
+                            "{:<20} {:>12} {:>12} {:>10}",
+                            port,
+                            format_bytes(b_in),
+                            format_bytes(b_out),
+                            conns,
+                        );
+                    }
                 }
             }
         }
