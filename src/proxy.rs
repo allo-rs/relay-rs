@@ -465,33 +465,26 @@ mod zero_copy {
     use std::io;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
     use std::ptr;
-    use tokio::io::unix::AsyncFd;
     use tokio::net::TcpStream;
 
-    const CHUNK: usize = 65536; // 每次 splice 的最大字节数
+    const CHUNK: usize = 65536;
 
     /// 用 splice(2) 实现双向零拷贝转发。
-    /// 为每个方向建立一条内核 pipe，数据在 socket buffer ↔ pipe buffer 间移动，
-    /// 全程不经过 userspace。
+    /// 直接复用 TcpStream 在 tokio reactor 中已注册的 epoll fd，
+    /// 省去 dup，每连接节省 2 个 FD。
     pub async fn splice_bidirectional(
-        client: &mut TcpStream,
-        server: &mut TcpStream,
+        client: &TcpStream,
+        server: &TcpStream,
     ) -> io::Result<(u64, u64)> {
-        // 为每个方向建立一对非阻塞 pipe
         let (c2s_rd, c2s_wr) = make_pipe()?;
         let (s2c_rd, s2c_wr) = make_pipe()?;
-
-        // dup socket fd 用于 AsyncFd 就绪通知（不影响原 TcpStream 的生命周期）
-        let c_afd = AsyncFd::new(dup_owned(client.as_raw_fd())?)?;
-        let s_afd = AsyncFd::new(dup_owned(server.as_raw_fd())?)?;
 
         let c_fd = client.as_raw_fd();
         let s_fd = server.as_raw_fd();
 
-        // 两个方向并发运行
         let (c2s, s2c) = tokio::join!(
-            splice_half(c_fd, s_fd, &c_afd, &s_afd, c2s_rd.as_raw_fd(), c2s_wr.as_raw_fd()),
-            splice_half(s_fd, c_fd, &s_afd, &c_afd, s2c_rd.as_raw_fd(), s2c_wr.as_raw_fd()),
+            splice_half(client, server, c_fd, s_fd, c2s_rd.as_raw_fd(), c2s_wr.as_raw_fd()),
+            splice_half(server, client, s_fd, c_fd, s2c_rd.as_raw_fd(), s2c_wr.as_raw_fd()),
         );
 
         Ok((c2s?, s2c?))
@@ -499,39 +492,34 @@ mod zero_copy {
 
     /// 单方向 splice 循环：src_fd → pipe → dst_fd
     async fn splice_half(
+        src: &TcpStream,
+        dst: &TcpStream,
         src_fd: RawFd,
         dst_fd: RawFd,
-        src_afd: &AsyncFd<OwnedFd>,
-        dst_afd: &AsyncFd<OwnedFd>,
         pipe_rd: RawFd,
         pipe_wr: RawFd,
     ) -> io::Result<u64> {
         let mut total = 0u64;
 
         loop {
-            // 等待 src 可读，然后 splice src → pipe
             let n = loop {
                 let mut guard = match tokio::time::timeout(
                     super::TCP_IDLE_TIMEOUT,
-                    src_afd.readable(),
+                    src.readable(),
                 ).await {
                     Ok(Ok(g)) => g,
                     Ok(Err(e)) => return Err(e),
                     Err(_) => return Err(io::Error::new(io::ErrorKind::TimedOut, "TCP 空闲超时")),
                 };
                 let n = unsafe {
-                    libc::splice(
-                        src_fd, ptr::null_mut(),
-                        pipe_wr, ptr::null_mut(),
-                        CHUNK,
-                        libc::SPLICE_F_MOVE | libc::SPLICE_F_NONBLOCK,
-                    )
+                    libc::splice(src_fd, ptr::null_mut(), pipe_wr, ptr::null_mut(), CHUNK,
+                        libc::SPLICE_F_MOVE | libc::SPLICE_F_NONBLOCK)
                 };
-                if n == 0 { return Ok(total); } // EOF：对端关闭连接
+                if n == 0 { return Ok(total); }
                 if n < 0 {
                     let e = io::Error::last_os_error();
                     if e.kind() == io::ErrorKind::WouldBlock {
-                        guard.clear_ready(); // 清除就绪标记，等待下次 epoll 通知
+                        guard.clear_ready();
                         continue;
                     }
                     return Err(e);
@@ -539,22 +527,16 @@ mod zero_copy {
                 break n as usize;
             };
 
-            // 把 pipe 里的数据全部 splice 到 dst
             let mut rem = n;
             while rem > 0 {
                 let m = unsafe {
-                    libc::splice(
-                        pipe_rd, ptr::null_mut(),
-                        dst_fd, ptr::null_mut(),
-                        rem,
-                        libc::SPLICE_F_MOVE | libc::SPLICE_F_NONBLOCK,
-                    )
+                    libc::splice(pipe_rd, ptr::null_mut(), dst_fd, ptr::null_mut(), rem,
+                        libc::SPLICE_F_MOVE | libc::SPLICE_F_NONBLOCK)
                 };
                 if m < 0 {
                     let e = io::Error::last_os_error();
                     if e.kind() == io::ErrorKind::WouldBlock {
-                        // dst 暂时不可写，等待后重试
-                        let mut guard = dst_afd.writable().await?;
+                        let mut guard = dst.writable().await?;
                         guard.clear_ready();
                         continue;
                     }
@@ -570,19 +552,11 @@ mod zero_copy {
         }
     }
 
-    /// 创建一对非阻塞 pipe，返回 (read_end, write_end)
     fn make_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
         let mut fds = [0i32; 2];
         let ret = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_NONBLOCK | libc::O_CLOEXEC) };
         if ret < 0 { return Err(io::Error::last_os_error()); }
         Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
-    }
-
-    /// dup 一个 fd 并包装为 OwnedFd（用于 AsyncFd 注册，不影响原 fd 的所有权）
-    fn dup_owned(fd: RawFd) -> io::Result<OwnedFd> {
-        let dup = unsafe { libc::dup(fd) };
-        if dup < 0 { return Err(io::Error::last_os_error()); }
-        Ok(unsafe { OwnedFd::from_raw_fd(dup) })
     }
 }
 
