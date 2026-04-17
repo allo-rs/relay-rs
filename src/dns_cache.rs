@@ -72,21 +72,40 @@ impl DnsCache {
 
         if let Some(mut rx) = maybe_rx {
             // 等待 in-flight 完成（sender 已在 mutex 释放前创建，send 发生在 mutex 释放后，不会错过）
-            let _ = rx.changed().await;
+            // Err 表示 sender 已 drop（发起任务被 abort），直接返回错误让调用方重试
+            if rx.changed().await.is_err() {
+                return Err(std::io::Error::other(format!("DNS 查询 {} 被中断，请重试", host)));
+            }
             return match rx.borrow().as_ref() {
                 Some(Ok(addrs)) => pick_addr(addrs, ipv6)
                     .ok_or_else(|| std::io::Error::other(format!("无法解析 {} 的地址", host))),
                 Some(Err(e)) => Err(std::io::Error::other(e.clone())),
-                None => Err(std::io::Error::other("in-flight DNS 请求已取消")),
+                None => Err(std::io::Error::other(format!("DNS 查询 {} 被中断，请重试", host))),
             };
         }
 
-        // 发起 DNS 查询
+        // 发起 DNS 查询，EAI_AGAIN（临时失败）最多重试 3 次
         let lookup = format!("{}:{}", host, port);
-        let result: Result<Vec<SocketAddr>, String> = tokio::net::lookup_host(&lookup)
-            .await
-            .map(|iter| iter.collect())
-            .map_err(|e| e.to_string());
+        let result: Result<Vec<SocketAddr>, String> = {
+            let mut last_err = String::new();
+            let mut ok = None;
+            for attempt in 0..3u8 {
+                match tokio::net::lookup_host(&lookup).await {
+                    Ok(iter) => { ok = Some(iter.collect::<Vec<_>>()); break; }
+                    Err(e) => {
+                        last_err = e.to_string();
+                        // 仅对临时性错误重试（EAI_AGAIN）
+                        if !last_err.contains("Try again") && !last_err.contains("SERVFAIL") {
+                            break;
+                        }
+                        if attempt < 2 {
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                        }
+                    }
+                }
+            }
+            ok.map(Ok).unwrap_or(Err(last_err))
+        };
 
         // 通知等待者 + 写缓存
         {
