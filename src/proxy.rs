@@ -533,6 +533,11 @@ mod zero_copy {
     }
 
     /// 单方向 splice 循环：src_fd → pipe → dst_fd，边传边累加 counter
+    ///
+    /// 必须通过 try_io() 而非 readable()/writable() + libc::splice 组合：
+    /// readable() 返回后不调用 tokio 的读方法，readiness token 不会被清除，
+    /// 导致下次 readable() 立即返回（stale ready），splice 又 EAGAIN，死等。
+    /// try_io() 在 WouldBlock 时自动调用 clear_readiness()，确保下次正确等待。
     async fn splice_half(
         src: &TcpStream,
         dst: &TcpStream,
@@ -542,55 +547,59 @@ mod zero_copy {
         pipe_wr: RawFd,
         counter: &AtomicU64,
     ) -> io::Result<()> {
+        use tokio::io::Interest;
         loop {
+            // 读 src → pipe：用 try_io 确保 readiness 正确清除
             let n = loop {
-                match tokio::time::timeout(super::TCP_IDLE_TIMEOUT, src.readable()).await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => return Err(e),
-                    Err(_) => return Err(io::Error::new(io::ErrorKind::TimedOut, "TCP 空闲超时")),
-                };
-                let n = unsafe {
-                    libc::splice(src_fd, ptr::null_mut(), pipe_wr, ptr::null_mut(), CHUNK,
-                        libc::SPLICE_F_MOVE | libc::SPLICE_F_NONBLOCK)
-                };
-                if n == 0 {
-                    // 将半关闭（FIN）信号传递给下游，否则对端不知道发送已结束
-                    unsafe { libc::shutdown(dst_fd, libc::SHUT_WR) };
-                    return Ok(());
-                }
-                if n < 0 {
-                    let e = io::Error::last_os_error();
-                    if e.kind() == io::ErrorKind::WouldBlock {
+                match src.try_io(Interest::READABLE, || {
+                    let n = unsafe {
+                        libc::splice(src_fd, ptr::null_mut(), pipe_wr, ptr::null_mut(), CHUNK,
+                            libc::SPLICE_F_MOVE | libc::SPLICE_F_NONBLOCK)
+                    };
+                    if n == 0 { return Ok(0usize); }
+                    if n < 0 { return Err(io::Error::last_os_error()); }
+                    Ok(n as usize)
+                }) {
+                    Ok(0) => {
+                        // 将半关闭（FIN）信号传递给下游
+                        unsafe { libc::shutdown(dst_fd, libc::SHUT_WR) };
+                        return Ok(());
+                    }
+                    Ok(n) => break n,
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        // try_io 已 clear_readiness，readable() 会正确等待新事件
                         match tokio::time::timeout(super::TCP_IDLE_TIMEOUT, src.readable()).await {
                             Ok(Ok(())) => {}
                             Ok(Err(e)) => return Err(e),
                             Err(_) => return Err(io::Error::new(io::ErrorKind::TimedOut, "TCP 空闲超时")),
                         }
-                        continue;
                     }
-                    return Err(e);
+                    Err(e) => return Err(e),
                 }
-                break n as usize;
             };
 
+            // 写 pipe → dst：同样用 try_io
             let mut rem = n;
             while rem > 0 {
-                let m = unsafe {
-                    libc::splice(pipe_rd, ptr::null_mut(), dst_fd, ptr::null_mut(), rem,
-                        libc::SPLICE_F_MOVE | libc::SPLICE_F_NONBLOCK)
-                };
-                if m < 0 {
-                    let e = io::Error::last_os_error();
-                    if e.kind() == io::ErrorKind::WouldBlock {
-                        dst.writable().await?;
-                        continue;
+                match dst.try_io(Interest::WRITABLE, || {
+                    let m = unsafe {
+                        libc::splice(pipe_rd, ptr::null_mut(), dst_fd, ptr::null_mut(), rem,
+                            libc::SPLICE_F_MOVE | libc::SPLICE_F_NONBLOCK)
+                    };
+                    if m < 0 { return Err(io::Error::last_os_error()); }
+                    if m == 0 { return Err(io::Error::new(io::ErrorKind::BrokenPipe, "目标连接已关闭")); }
+                    Ok(m as usize)
+                }) {
+                    Ok(m) => rem -= m,
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        match tokio::time::timeout(super::TCP_IDLE_TIMEOUT, dst.writable()).await {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => return Err(e),
+                            Err(_) => return Err(io::Error::new(io::ErrorKind::TimedOut, "TCP 空闲超时")),
+                        }
                     }
-                    return Err(e);
+                    Err(e) => return Err(e),
                 }
-                if m == 0 {
-                    return Err(io::Error::new(io::ErrorKind::BrokenPipe, "目标连接已关闭"));
-                }
-                rem -= m as usize;
             }
 
             counter.fetch_add(n as u64, Ordering::Relaxed);
