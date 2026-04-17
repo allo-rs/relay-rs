@@ -418,25 +418,23 @@ async fn relay(
     let result = do_relay(&mut client, &mut server).await;
 
     // 更新统计（bytes_in/out/connections，写入 /tmp/relay-rs.stats）
-    let (c2s, s2c) = match result {
+    // 出错时不计入 total_conns，避免 0B 连接数虚高
+    match result {
         Ok((c2s, s2c)) => {
             log::debug!("{} ↔ {}  ↑{} ↓{}", peer, to_str, fmt_bytes(c2s), fmt_bytes(s2c));
-            (c2s, s2c)
+            match state.stats.lock() {
+                Ok(mut map) => {
+                    let s = map.entry(key).or_default();
+                    s.total_conns += 1;
+                    s.bytes_in += c2s;
+                    s.bytes_out += s2c;
+                }
+                Err(e) => log::warn!("统计锁获取失败: {}", e),
+            }
         }
         Err(e) => {
             log::debug!("{} 断开: {}", peer, e);
-            (0, 0)
         }
-    };
-
-    match state.stats.lock() {
-        Ok(mut map) => {
-            let s = map.entry(key).or_default();
-            s.total_conns += 1;
-            s.bytes_in += c2s;
-            s.bytes_out += s2c;
-        }
-        Err(e) => log::warn!("统计锁获取失败: {}", e),
     }
 }
 
