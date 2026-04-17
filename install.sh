@@ -5,7 +5,16 @@ set -euo pipefail
 REPO="allo-rs/relay-rs"
 # 国内访问 GitHub 慢时可设置代理，留空则直连
 # 例: GITHUB_PROXY="https://gh-proxy.org/"
-GITHUB_PROXY="${GITHUB_PROXY:-https://gh-proxy.org/}"
+_PROXY_DEFAULT="https://gh-proxy.org/"
+if [[ -z "${GITHUB_PROXY+x}" ]]; then
+  if curl -fsSL --connect-timeout 5 --max-time 8 -o /dev/null \
+      "https://github.com" 2>/dev/null; then
+    GITHUB_PROXY=""
+  else
+    warn "GitHub 直连超时，自动启用代理: ${_PROXY_DEFAULT}"
+    GITHUB_PROXY="$_PROXY_DEFAULT"
+  fi
+fi
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/relay-rs"
 SERVICE_FILE="/etc/systemd/system/relay-rs.service"
