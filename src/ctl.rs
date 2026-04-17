@@ -355,6 +355,16 @@ pub fn del(config: &mut Config) -> Result<bool, Box<dyn std::error::Error>> {
         return Ok(false);
     }
 
+    let preview = &items[selection];
+    if !Confirm::with_theme(&theme)
+        .with_prompt(format!("确认删除 {}？", preview))
+        .default(false)
+        .interact()?
+    {
+        println!("已取消");
+        return Ok(false);
+    }
+
     if selection < config.forward.len() {
         let removed = config.forward.remove(selection);
         let to_display = removed.to.join(", ");
