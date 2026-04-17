@@ -16,7 +16,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -238,9 +238,9 @@ async fn listen_udp_rule(rule: ForwardRule, port: u16, port_offset: u16, dns_cac
     let label = rule.comment.as_deref().unwrap_or(&rule.listen).to_string();
     log::info!("用户态 UDP 监听 {}  [{}]", bind, label);
 
-    // client_addr → 已连接到目标的 UdpSocket
-    let sessions: Arc<Mutex<HashMap<SocketAddr, Arc<UdpSocket>>>> =
-        Arc::new(Mutex::new(HashMap::<SocketAddr, Arc<UdpSocket>>::new()));
+    // client_addr → 已连接到目标的 UdpSocket（RwLock：查找用读锁，插入用写锁）
+    let sessions: Arc<RwLock<HashMap<SocketAddr, Arc<UdpSocket>>>> =
+        Arc::new(RwLock::new(HashMap::new()));
 
     let mut buf = vec![0u8; UDP_BUF_SIZE];
 
@@ -276,8 +276,8 @@ async fn listen_udp_rule(rule: ForwardRule, port: u16, port_offset: u16, dns_cac
 
         // 查找或创建 per-client 的出站 UdpSocket
         let target_sock: Arc<UdpSocket> = {
-            // 先在锁内检查是否已有 session
-            let existing = sessions.lock().unwrap().get(&client_addr).cloned();
+            // 先用读锁检查是否已有 session（多数情况下命中，无需写锁）
+            let existing = sessions.read().unwrap().get(&client_addr).cloned();
             if let Some(s) = existing {
                 s
             } else {
@@ -291,7 +291,7 @@ async fn listen_udp_rule(rule: ForwardRule, port: u16, port_offset: u16, dns_cac
                     continue;
                 }
                 let sock = Arc::new(sock);
-                sessions.lock().unwrap().insert(client_addr, sock.clone());
+                sessions.write().unwrap().insert(client_addr, sock.clone());
 
                 // spawn 回包任务：target → client
                 let sock_rx = sock.clone();
@@ -319,7 +319,7 @@ async fn listen_udp_rule(rule: ForwardRule, port: u16, port_offset: u16, dns_cac
                         }
                     }
                     // 从 sessions map 中移除
-                    sessions_gc.lock().unwrap().remove(&client_addr);
+                    sessions_gc.write().unwrap().remove(&client_addr);
                 });
 
                 sock
@@ -428,22 +428,25 @@ async fn relay(
 async fn do_relay(client: &mut TcpStream, server: &mut TcpStream) -> io::Result<(u64, u64)> {
     #[cfg(target_os = "linux")]
     {
-        return zero_copy::splice_bidirectional(client, server).await;
+        match zero_copy::splice_bidirectional(client, server).await {
+            // EINVAL：内核不支持对该 fd 类型使用 splice，回退到 copy
+            Err(ref e) if e.raw_os_error() == Some(libc::EINVAL) => {
+                log::debug!("splice 不支持，回退到 copy 模式");
+            }
+            result => return result,
+        }
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let (mut cr, mut cw) = client.split();
-        let (mut sr, mut sw) = server.split();
-        let (c2s, s2c) = tokio::try_join!(
-            copy_with_idle(&mut cr, &mut sw),
-            copy_with_idle(&mut sr, &mut cw),
-        )?;
-        Ok((c2s, s2c))
-    }
+    // copy 路径（非 Linux，或 splice 回退）
+    let (mut cr, mut cw) = client.split();
+    let (mut sr, mut sw) = server.split();
+    let (c2s, s2c) = tokio::try_join!(
+        copy_with_idle(&mut cr, &mut sw),
+        copy_with_idle(&mut sr, &mut cw),
+    )?;
+    Ok((c2s, s2c))
 }
 
 /// 单方向带空闲超时的 copy，EOF 时主动 shutdown 写端
-#[cfg(not(target_os = "linux"))]
 async fn copy_with_idle<R, W>(r: &mut R, w: &mut W) -> io::Result<u64>
 where
     R: tokio::io::AsyncRead + Unpin,
