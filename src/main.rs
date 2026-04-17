@@ -60,8 +60,15 @@ enum Command {
     Add,
     /// 交互式删除规则
     Del,
+    /// 交互式编辑已有规则
+    Edit,
     /// 检查转发规则连通性
     Check,
+    /// 直接探测指定地址端口（如 1.2.3.4:443 或 example.com:80）
+    Ping {
+        /// 目标地址，格式 host:port
+        target: String,
+    },
     /// 切换转发模式（nat / relay）
     Mode,
     /// 查看各规则流量统计
@@ -120,6 +127,7 @@ fn run_ctl(cmd: Command, config: &str, interval: u64) {
                 Err(e) => { eprintln!("{}", e); std::process::exit(1); }
             }
         }
+        Command::Ping { target } => ctl::ping(&target),
         Command::List    => {
             match config::load(config) {
                 Ok(cfg) => ctl::list(&cfg),
@@ -139,6 +147,27 @@ fn run_ctl(cmd: Command, config: &str, interval: u64) {
                     }
                     Err(e) => { eprintln!("保存失败: {}", e); std::process::exit(1); }
                 },
+                Err(e) => { eprintln!("错误: {}", e); std::process::exit(1); }
+            }
+        }
+        Command::Edit => {
+            let mut cfg = match config::load(config) {
+                Ok(c) => c,
+                Err(e) => { eprintln!("{}", e); std::process::exit(1); }
+            };
+            match ctl::edit(&mut cfg) {
+                Ok(true) => match config::save(&cfg, config) {
+                    Ok(_) => {
+                        println!();
+                        ctl::list(&cfg);
+                        println!();
+                        if ctl::confirm("立即重启服务使变更生效？[Y/n]", true) {
+                            systemctl("restart");
+                        }
+                    }
+                    Err(e) => { eprintln!("保存失败: {}", e); std::process::exit(1); }
+                },
+                Ok(false) => {}
                 Err(e) => { eprintln!("错误: {}", e); std::process::exit(1); }
             }
         }

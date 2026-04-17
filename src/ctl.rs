@@ -65,6 +65,12 @@ pub fn list(config: &Config) {
     }
 }
 
+// ── rr ping ──────────────────────────────────────────────────────
+
+pub fn ping(target: &str) {
+    probe_target(target, false, &Proto::All);
+}
+
 // ── rr check ─────────────────────────────────────────────────────
 
 pub fn check(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
@@ -365,6 +371,200 @@ pub fn del(config: &mut Config) -> Result<bool, Box<dyn std::error::Error>> {
     }
 
     Ok(true)
+}
+
+// ── rr edit ──────────────────────────────────────────────────────
+
+/// 返回 Ok(true) 表示已编辑，Ok(false) 表示用户取消
+pub fn edit(config: &mut Config) -> Result<bool, Box<dyn std::error::Error>> {
+    let total = config.forward.len() + config.block.len();
+    if total == 0 {
+        println!("（暂无规则）");
+        return Ok(false);
+    }
+
+    let mut items: Vec<String> = Vec::new();
+    for r in &config.forward {
+        let to_display = r.to.join(", ");
+        let cmt = r.comment.as_deref().map(|s| format!(" # {}", s)).unwrap_or_default();
+        items.push(format!("[转发] {}  →  {}{}", r.listen, to_display, cmt));
+    }
+    for b in &config.block {
+        let mut parts = Vec::new();
+        if let Some(s) = &b.src  { parts.push(format!("src={}", s)); }
+        if let Some(d) = &b.dst  { parts.push(format!("dst={}", d)); }
+        if let Some(p) = b.port  { parts.push(format!("port={}", p)); }
+        let cmt = b.comment.as_deref().map(|s| format!(" # {}", s)).unwrap_or_default();
+        items.push(format!("[防火墙] {}{}", parts.join(" "), cmt));
+    }
+    items.push("取消".to_string());
+
+    let theme = ColorfulTheme::default();
+    let selection = Select::with_theme(&theme)
+        .with_prompt("选择要编辑的规则（↑↓ 选择，回车确认）")
+        .items(&items)
+        .default(0)
+        .interact()?;
+
+    if selection == total {
+        println!("已取消");
+        return Ok(false);
+    }
+
+    if selection < config.forward.len() {
+        let rule = config.forward[selection].clone();
+        config.forward[selection] = edit_forward(rule, &theme)?;
+    } else {
+        let bi = selection - config.forward.len();
+        let rule = config.block[bi].clone();
+        config.block[bi] = edit_block(rule, &theme)?;
+    }
+
+    Ok(true)
+}
+
+fn edit_forward(rule: ForwardRule, theme: &ColorfulTheme) -> Result<ForwardRule, Box<dyn std::error::Error>> {
+    let listen: String = Input::with_theme(theme)
+        .with_prompt("本机端口（单端口 10000 或端口段 10000-10100）")
+        .with_initial_text(&rule.listen)
+        .interact_text()?;
+
+    // 逐个编辑已有目标地址
+    let mut to_list: Vec<String> = Vec::new();
+    for (i, existing) in rule.to.iter().enumerate() {
+        let target: String = Input::with_theme(theme)
+            .with_prompt(format!("目标地址 {}", i + 1))
+            .with_initial_text(existing)
+            .interact_text()?;
+        to_list.push(target);
+    }
+
+    // 追加额外目标
+    while Confirm::with_theme(theme)
+        .with_prompt("继续添加目标（负载均衡）？")
+        .default(false)
+        .interact()?
+    {
+        let extra: String = Input::with_theme(theme)
+            .with_prompt("额外目标地址（host:port）")
+            .interact_text()?;
+        to_list.push(extra);
+    }
+
+    let balance = if to_list.len() > 1 {
+        let current = match rule.balance.as_ref().unwrap_or(&Balance::RoundRobin) {
+            Balance::RoundRobin => 0,
+            Balance::Random     => 1,
+        };
+        let idx = Select::with_theme(theme)
+            .with_prompt("负载均衡策略")
+            .items(&["round-robin（轮询，默认）", "random（随机）"])
+            .default(current)
+            .interact()?;
+        Some(if idx == 1 { Balance::Random } else { Balance::RoundRobin })
+    } else {
+        None
+    };
+
+    let current_proto = match rule.proto { Proto::All => 0, Proto::Tcp => 1, Proto::Udp => 2 };
+    let proto_idx = Select::with_theme(theme)
+        .with_prompt("协议")
+        .items(&["all（默认）", "tcp", "udp"])
+        .default(current_proto)
+        .interact()?;
+    let proto = match proto_idx { 1 => Proto::Tcp, 2 => Proto::Udp, _ => Proto::All };
+
+    let ip_ver = Select::with_theme(theme)
+        .with_prompt("目标域名解析方式")
+        .items(&["IPv4（默认）", "IPv6"])
+        .default(if rule.ipv6 { 1 } else { 0 })
+        .interact()?;
+
+    let rate_str: String = Input::with_theme(theme)
+        .with_prompt("带宽限速 Mbps（可选，回车清除）")
+        .with_initial_text(rule.rate_limit.map(|v| v.to_string()).unwrap_or_default())
+        .allow_empty(true)
+        .interact_text()?;
+    let rate_limit = if rate_str.is_empty() {
+        None
+    } else {
+        match rate_str.trim().parse::<u32>() {
+            Ok(v) => Some(v),
+            Err(_) => { eprintln!("无效数字，跳过限速"); None }
+        }
+    };
+
+    let comment: String = Input::with_theme(theme)
+        .with_prompt("备注（可选，回车清除）")
+        .with_initial_text(rule.comment.as_deref().unwrap_or(""))
+        .allow_empty(true)
+        .interact_text()?;
+
+    Ok(ForwardRule {
+        listen,
+        to: to_list,
+        proto,
+        ipv6: ip_ver == 1,
+        balance,
+        rate_limit,
+        comment: if comment.is_empty() { None } else { Some(comment) },
+    })
+}
+
+fn edit_block(rule: BlockRule, theme: &ColorfulTheme) -> Result<BlockRule, Box<dyn std::error::Error>> {
+    let src: String = Input::with_theme(theme)
+        .with_prompt("源 IP 或 CIDR（可选，回车清除）")
+        .with_initial_text(rule.src.as_deref().unwrap_or(""))
+        .allow_empty(true)
+        .interact_text()?;
+
+    let dst: String = Input::with_theme(theme)
+        .with_prompt("目标 IP 或 CIDR（可选）")
+        .with_initial_text(rule.dst.as_deref().unwrap_or(""))
+        .allow_empty(true)
+        .interact_text()?;
+
+    let port: String = Input::with_theme(theme)
+        .with_prompt("目标端口（可选）")
+        .with_initial_text(rule.port.map(|p| p.to_string()).unwrap_or_default())
+        .allow_empty(true)
+        .interact_text()?;
+
+    let port = port.parse::<u16>().ok();
+    let src  = if src.is_empty() { None } else { Some(src) };
+    let dst  = if dst.is_empty() { None } else { Some(dst) };
+
+    if src.is_none() && dst.is_none() && port.is_none() {
+        return Err("src / dst / port 至少填一项".into());
+    }
+
+    let current_proto = match rule.proto { Proto::All => 0, Proto::Tcp => 1, Proto::Udp => 2 };
+    let proto_idx = Select::with_theme(theme)
+        .with_prompt("协议")
+        .items(&["all（默认）", "tcp", "udp"])
+        .default(current_proto)
+        .interact()?;
+    let proto = match proto_idx { 1 => Proto::Tcp, 2 => Proto::Udp, _ => Proto::All };
+
+    let chain_default = match rule.chain { Chain::Input => 0, Chain::Forward => 1 };
+    let chain_idx = Select::with_theme(theme)
+        .with_prompt("作用链")
+        .items(&["input（入站，默认）", "forward（转发）"])
+        .default(chain_default)
+        .interact()?;
+
+    let comment: String = Input::with_theme(theme)
+        .with_prompt("备注（可选）")
+        .with_initial_text(rule.comment.as_deref().unwrap_or(""))
+        .allow_empty(true)
+        .interact_text()?;
+
+    Ok(BlockRule {
+        src, dst, port, proto,
+        chain: if chain_idx == 1 { Chain::Forward } else { Chain::Input },
+        ipv6: rule.ipv6,
+        comment: if comment.is_empty() { None } else { Some(comment) },
+    })
 }
 
 // ── rr stats ─────────────────────────────────────────────────────
