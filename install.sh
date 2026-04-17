@@ -40,13 +40,18 @@ esac
 
 info "检测到架构: $ARCH，使用产物: $ARTIFACT"
 
-# ── 获取最新版本号 ─────────────────────────────────────────────────
-info "获取最新版本..."
-LATEST=$(curl -fsSL --connect-timeout 10 --max-time 30 \
-  "https://api.github.com/repos/${REPO}/releases/latest" \
-  | grep '"tag_name"' | cut -d'"' -f4)
-[[ -z "$LATEST" ]] && error "无法获取最新版本，请检查仓库地址或网络"
-info "最新版本: $LATEST"
+# ── 获取版本号（支持 VERSION 环境变量指定，否则拉最新）─────────────
+if [[ -n "${VERSION:-}" ]]; then
+  LATEST="$VERSION"
+  info "使用指定版本: $LATEST"
+else
+  info "获取最新版本..."
+  LATEST=$(curl -fsSL --connect-timeout 10 --max-time 30 \
+    "https://api.github.com/repos/${REPO}/releases/latest" \
+    | grep '"tag_name"' | cut -d'"' -f4)
+  [[ -z "$LATEST" ]] && error "无法获取最新版本，请检查仓库地址或网络"
+  info "最新版本: $LATEST"
+fi
 
 # ── 下载二进制 ────────────────────────────────────────────────────
 DOWNLOAD_URL="${GITHUB_PROXY}https://github.com/${REPO}/releases/download/${LATEST}/${ARTIFACT}"
