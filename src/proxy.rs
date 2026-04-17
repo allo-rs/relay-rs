@@ -545,7 +545,11 @@ mod zero_copy {
                     libc::splice(src_fd, ptr::null_mut(), pipe_wr, ptr::null_mut(), CHUNK,
                         libc::SPLICE_F_MOVE | libc::SPLICE_F_NONBLOCK)
                 };
-                if n == 0 { return Ok(()); }
+                if n == 0 {
+                    // 将半关闭（FIN）信号传递给下游，否则对端不知道发送已结束
+                    unsafe { libc::shutdown(dst_fd, libc::SHUT_WR) };
+                    return Ok(());
+                }
                 if n < 0 {
                     let e = io::Error::last_os_error();
                     if e.kind() == io::ErrorKind::WouldBlock {
