@@ -6,7 +6,8 @@ mod nft;
 mod proxy;
 mod relay_state;
 
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{Parser, Subcommand};
+use dialoguer::{Input, Select, theme::ColorfulTheme};
 use nft::{ResolvedForward, ResolvedTarget};
 use std::net::TcpStream;
 use std::sync::Arc;
@@ -82,12 +83,7 @@ fn main() {
     let cli = Cli::parse();
     match cli.command {
         Some(cmd) => run_ctl(cmd, &cli.config, cli.interval),
-        None => {
-            // 无子命令时打印帮助，避免误触守护进程模式覆盖 nftables 规则
-            let mut cmd = Cli::command();
-            cmd.print_help().unwrap();
-            println!();
-        }
+        None => run_menu(&cli.config),
     }
 }
 
@@ -193,6 +189,154 @@ fn run_ctl(cmd: Command, config: &str, interval: u64) {
             }
         }
     }
+}
+
+// ── 主菜单 ───────────────────────────────────────────────────────
+
+fn run_menu(config: &str) {
+    let theme = ColorfulTheme::default();
+    let choices = [
+        "添加规则",
+        "编辑规则",
+        "删除规则",
+        "检查连通性",
+        "Ping 端口",
+        "流量统计",
+        "切换模式",
+        "退出",
+    ];
+
+    loop {
+        // 清屏
+        print!("\x1b[2J\x1b[H");
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+
+        println!("relay-rs — 规则管理\n");
+        match config::load(config) {
+            Ok(ref cfg) => ctl::list(cfg),
+            Err(_) => println!("（暂无规则）"),
+        }
+        println!();
+
+        let sel = match Select::with_theme(&theme)
+            .with_prompt("操作（↑↓ 选择，回车确认，Esc 退出）")
+            .items(&choices)
+            .default(0)
+            .interact_opt()
+        {
+            Ok(Some(s)) => s,
+            _ => break,
+        };
+
+        println!();
+
+        match sel {
+            0 => { // 添加规则
+                let mut cfg = config::load(config).unwrap_or_default();
+                match ctl::add(&mut cfg) {
+                    Ok(_) => match config::save(&cfg, config) {
+                        Ok(_) => {
+                            println!("\n规则已添加。");
+                            if ctl::confirm("立即重启服务？[Y/n]", true) {
+                                systemctl_quiet("restart");
+                            }
+                        }
+                        Err(e) => { eprintln!("保存失败: {}", e); pause(); }
+                    },
+                    Err(e) => { eprintln!("错误: {}", e); pause(); }
+                }
+            }
+            1 => { // 编辑规则
+                let mut cfg = match config::load(config) {
+                    Ok(c) => c,
+                    Err(e) => { eprintln!("{}", e); pause(); continue; }
+                };
+                match ctl::edit(&mut cfg) {
+                    Ok(true) => match config::save(&cfg, config) {
+                        Ok(_) => {
+                            println!();
+                            ctl::list(&cfg);
+                            println!();
+                            if ctl::confirm("立即重启服务？[Y/n]", true) {
+                                systemctl_quiet("restart");
+                            }
+                        }
+                        Err(e) => { eprintln!("保存失败: {}", e); pause(); }
+                    },
+                    Ok(false) => {}
+                    Err(e) => { eprintln!("错误: {}", e); pause(); }
+                }
+            }
+            2 => { // 删除规则
+                let mut cfg = match config::load(config) {
+                    Ok(c) => c,
+                    Err(e) => { eprintln!("{}", e); pause(); continue; }
+                };
+                match ctl::del(&mut cfg) {
+                    Ok(true) => match config::save(&cfg, config) {
+                        Ok(_) => {
+                            if ctl::confirm("立即重启服务？[Y/n]", true) {
+                                systemctl_quiet("restart");
+                            }
+                        }
+                        Err(e) => { eprintln!("保存失败: {}", e); pause(); }
+                    },
+                    Ok(false) => {}
+                    Err(e) => { eprintln!("错误: {}", e); pause(); }
+                }
+            }
+            3 => { // 检查连通性
+                match config::load(config) {
+                    Ok(cfg) => { let _ = ctl::check(&cfg); }
+                    Err(e) => eprintln!("{}", e),
+                }
+                pause();
+            }
+            4 => { // Ping 端口
+                if let Ok(target) = Input::<String>::with_theme(&theme)
+                    .with_prompt("目标地址（host:port）")
+                    .interact_text()
+                {
+                    ctl::ping(&target);
+                    pause();
+                }
+            }
+            5 => { // 流量统计
+                ctl::stats();
+                pause();
+            }
+            6 => { // 切换模式
+                let cfg = match config::load(config) {
+                    Ok(c) => c,
+                    Err(e) => { eprintln!("{}", e); pause(); continue; }
+                };
+                match ctl::mode_cmd(cfg, config) {
+                    Ok(true) => {
+                        if ctl::confirm("立即重启服务？[Y/n]", true) {
+                            systemctl_quiet("restart");
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(e) => { eprintln!("{}", e); pause(); }
+                }
+            }
+            _ => break, // 退出
+        }
+    }
+}
+
+fn pause() {
+    use std::io::{Read, Write};
+    print!("\n按回车返回菜单...");
+    std::io::stdout().flush().ok();
+    let _ = std::io::stdin().read(&mut [0u8]);
+}
+
+fn systemctl_quiet(action: &str) {
+    let _ = std::process::Command::new("systemctl")
+        .args([action, SERVICE])
+        .status();
 }
 
 fn systemctl(action: &str) {
