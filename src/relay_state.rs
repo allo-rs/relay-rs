@@ -3,8 +3,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::Semaphore;
 
 use crate::config::BlockRule;
+
+/// 最大并发 TCP 转发连接数（每连接在 Linux 上消耗约 6 个 FD：2 socket + 4 pipe）
+pub const MAX_CONNS: usize = 4096;
 
 // ── 流量统计 ──────────────────────────────────────────────────────
 
@@ -64,6 +68,8 @@ pub struct RelayState {
     pub limiters: Mutex<HashMap<String, TokenBucket>>,
     /// Block 规则列表（只读，启动时加载）
     pub block_rules: Vec<BlockRule>,
+    /// 并发连接数上限信号量，防止 FD 耗尽
+    pub conn_sem: Arc<Semaphore>,
 }
 
 pub type SharedState = Arc<RelayState>;
@@ -74,6 +80,7 @@ impl RelayState {
             stats: Mutex::new(HashMap::new()),
             limiters: Mutex::new(HashMap::new()),
             block_rules,
+            conn_sem: Arc::new(Semaphore::new(MAX_CONNS)),
         })
     }
 

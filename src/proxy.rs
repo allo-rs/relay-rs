@@ -208,7 +208,16 @@ async fn listen_single_tcp(
                 let rule = rule.clone();
                 let state = Arc::clone(&state);
                 let cache = dns_cache.clone();
-                tokio::spawn(relay(client, peer, rule, port_offset, state, cache));
+                let sem = Arc::clone(&state.conn_sem) as Arc<tokio::sync::Semaphore>;
+                match sem.acquire_owned().await {
+                    Ok(permit) => {
+                        tokio::spawn(async move {
+                            relay(client, peer, rule, port_offset, state, cache).await;
+                            drop(permit);
+                        });
+                    }
+                    Err(_) => {} // 信号量已关闭（正在 shutdown）
+                }
             }
             Err(e) => {
                 // EMFILE/ENFILE：FD 耗尽，等待已有连接释放资源后再重试
@@ -602,10 +611,14 @@ async fn health_check_loop(rules: Vec<ForwardRule>, dns_cache: DnsCache) {
                     Ok(a) => a,
                     Err(_) => continue,
                 };
-                match TcpStream::connect(addr).await {
-                    Ok(_) => log::debug!("健康检查 OK: {}", to_str),
-                    Err(e) => {
+                match timeout(Duration::from_secs(5), TcpStream::connect(addr)).await {
+                    Ok(Ok(_)) => log::debug!("健康检查 OK: {}", to_str),
+                    Ok(Err(e)) => {
                         log::warn!("健康检查失败: {} ({}): {}", to_str, addr, e);
+                        dns_cache.invalidate(&target.host, target.port_start, rule.ipv6);
+                    }
+                    Err(_) => {
+                        log::warn!("健康检查超时: {} ({})", to_str, addr);
                         dns_cache.invalidate(&target.host, target.port_start, rule.ipv6);
                     }
                 }
