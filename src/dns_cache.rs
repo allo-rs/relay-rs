@@ -27,6 +27,24 @@ pub struct DnsCache {
     inner: Arc<Mutex<Inner>>,
 }
 
+/// Drop guard：确保发起 DNS 查询的任务被 abort 时，in-flight 条目被清理，
+/// 不会让等待同一 key 的后续请求永久挂死。
+struct InflightGuard {
+    inner: Arc<Mutex<Inner>>,
+    key: String,
+    tx: Arc<InflightSender>,
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        // 发送中断信号唤醒所有等待者，再从 inflight 移除
+        let _ = self.tx.send(Some(Err("DNS 查询被中断".to_string())));
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.inflight.remove(&self.key);
+        }
+    }
+}
+
 impl DnsCache {
     pub fn new() -> Self {
         Self {
@@ -84,6 +102,13 @@ impl DnsCache {
             };
         }
 
+        // 创建 guard：确保即使当前任务被 abort，in-flight 条目也会被清理
+        let guard = InflightGuard {
+            inner: Arc::clone(&self.inner),
+            key: key.clone(),
+            tx: self.inner.lock().unwrap().inflight.get(&key).cloned().unwrap(),
+        };
+
         // 发起 DNS 查询，EAI_AGAIN（临时失败）最多重试 3 次
         let lookup = format!("{}:{}", host, port);
         let result: Result<Vec<SocketAddr>, String> = {
@@ -107,7 +132,7 @@ impl DnsCache {
             ok.map(Ok).unwrap_or(Err(last_err))
         };
 
-        // 通知等待者 + 写缓存
+        // 正常完成：通知等待者 + 写缓存，然后阻止 guard 的 Drop 重复清理
         {
             let mut inner = self.inner.lock().unwrap();
             if let Some(tx) = inner.inflight.remove(&key) {
@@ -128,6 +153,8 @@ impl DnsCache {
                 }
             }
         }
+        // inflight 已手动清理，不需要 guard 的 Drop 再跑一次
+        std::mem::forget(guard);
 
         match result {
             Ok(addrs) if !addrs.is_empty() => pick_addr(&addrs, ipv6)
