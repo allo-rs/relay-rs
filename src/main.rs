@@ -425,7 +425,7 @@ fn run_nat_daemon(config_path: &str, interval: u64, reload: Arc<AtomicBool>) {
 }
 
 fn run_relay_daemon(config_path: &str, reload: Arc<AtomicBool>) {
-    let rt = tokio::runtime::Builder::new_current_thread()
+    let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("无法创建 proxy runtime");

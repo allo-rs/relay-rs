@@ -31,6 +31,8 @@ use crate::relay_state::{RelayState, SharedState, TokenBucket};
 
 static RR_CTR: AtomicUsize = AtomicUsize::new(0);
 
+/// TCP 连接单方向空闲超时：任一方向 300s 无数据即断开
+const TCP_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// UDP session 空闲超时时间
 const UDP_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 /// UDP 收包缓冲区大小
@@ -74,6 +76,18 @@ pub async fn run(config_path: &str, reload: Arc<AtomicBool>) {
             });
         }
 
+        // 定期将统计刷盘，避免每次连接都做阻塞文件 I/O
+        {
+            let state_flush = Arc::clone(&state);
+            set.spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                    let s = Arc::clone(&state_flush);
+                    tokio::task::spawn_blocking(move || s.flush_to_file()).await.ok();
+                }
+            });
+        }
+
         for rule in cfg.forward {
             let listen = match crate::config::Listen::parse(&rule.listen) {
                 Ok(l) => l,
@@ -114,12 +128,29 @@ pub async fn run(config_path: &str, reload: Arc<AtomicBool>) {
         }
 
         loop {
-            if reload.swap(false, Ordering::Relaxed) {
-                log::info!("收到 SIGHUP，重载配置");
-                set.abort_all();
-                break;
+            tokio::select! {
+                biased;
+                result = set.join_next() => {
+                    match result {
+                        None => break, // 所有任务均已退出
+                        Some(Err(e)) if e.is_cancelled() => {} // abort 导致的正常取消
+                        Some(_) => {
+                            // 监听任务意外退出（返回或 panic），5s 后重启全部规则
+                            log::warn!("监听任务意外退出，5s 后重启");
+                            set.abort_all();
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                            break;
+                        }
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                    if reload.swap(false, Ordering::Relaxed) {
+                        log::info!("收到 SIGHUP，重载配置");
+                        set.abort_all();
+                        break;
+                    }
+                }
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
         }
     }
 }
@@ -180,8 +211,14 @@ async fn listen_single_tcp(
                 tokio::spawn(relay(client, peer, rule, port_offset, state, cache));
             }
             Err(e) => {
-                log::error!("TCP accept 失败 {}: {}", bind, e);
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                // EMFILE/ENFILE：FD 耗尽，等待已有连接释放资源后再重试
+                if matches!(e.raw_os_error(), Some(libc::EMFILE) | Some(libc::ENFILE)) {
+                    log::error!("文件描述符耗尽 {}，等待资源释放: {}", bind, e);
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                } else {
+                    log::error!("TCP accept 失败 {}: {}", bind, e);
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
             }
         }
     }
@@ -378,7 +415,6 @@ async fn relay(
         }
         Err(e) => log::warn!("统计锁获取失败: {}", e),
     }
-    state.flush_to_file();
 }
 
 // ── 转发策略分发 ──────────────────────────────────────────────────
@@ -390,8 +426,35 @@ async fn do_relay(client: &mut TcpStream, server: &mut TcpStream) -> io::Result<
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let (c2s, s2c) = io::copy_bidirectional(client, server).await?;
+        let (mut cr, mut cw) = client.split();
+        let (mut sr, mut sw) = server.split();
+        let (c2s, s2c) = tokio::try_join!(
+            copy_with_idle(&mut cr, &mut sw),
+            copy_with_idle(&mut sr, &mut cw),
+        )?;
         Ok((c2s, s2c))
+    }
+}
+
+/// 单方向带空闲超时的 copy，EOF 时主动 shutdown 写端
+#[cfg(not(target_os = "linux"))]
+async fn copy_with_idle<R, W>(r: &mut R, w: &mut W) -> io::Result<u64>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut buf = [0u8; 8192];
+    let mut total = 0u64;
+    loop {
+        let n = match timeout(TCP_IDLE_TIMEOUT, r.read(&mut buf)).await {
+            Ok(Ok(0)) => { w.shutdown().await.ok(); return Ok(total); }
+            Ok(Ok(n)) => n,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => return Err(io::Error::new(io::ErrorKind::TimedOut, "TCP 空闲超时")),
+        };
+        w.write_all(&buf[..n]).await?;
+        total += n as u64;
     }
 }
 
@@ -448,7 +511,14 @@ mod zero_copy {
         loop {
             // 等待 src 可读，然后 splice src → pipe
             let n = loop {
-                let mut guard = src_afd.readable().await?;
+                let mut guard = match tokio::time::timeout(
+                    super::TCP_IDLE_TIMEOUT,
+                    src_afd.readable(),
+                ).await {
+                    Ok(Ok(g)) => g,
+                    Ok(Err(e)) => return Err(e),
+                    Err(_) => return Err(io::Error::new(io::ErrorKind::TimedOut, "TCP 空闲超时")),
+                };
                 let n = unsafe {
                     libc::splice(
                         src_fd, ptr::null_mut(),
