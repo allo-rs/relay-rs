@@ -565,7 +565,7 @@ mod zero_copy {
         let (rd, wr) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
         // 尝试将管道容量扩大到系统上限（/proc/sys/fs/pipe-max-size，通常 1MB），
         // 失败时静默忽略，内核默认 64KB 仍可正常工作。
-        unsafe { libc::fcntl(wr.as_raw_fd(), libc::F_SETPIPE_SZ, PIPE_MAX_SIZE as libc::c_int) };
+        unsafe { libc::fcntl(wr.as_raw_fd(), libc::F_SETPIPE_SZ, *PIPE_MAX_SIZE as libc::c_int) };
         Ok((rd, wr))
     }
 
