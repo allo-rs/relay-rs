@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tokio::io;
@@ -449,33 +449,37 @@ async fn do_relay(client: &mut TcpStream, server: &mut TcpStream) -> io::Result<
             result => return result,
         }
     }
-    // copy 路径（非 Linux，或 splice 回退）brutal shutdown 同上
+    // copy 路径（非 Linux，或 splice 回退）
+    // 用 try_join! 而非 select!：一方出错立即取消（brutal shutdown），
+    // 一方正常 EOF 则等另一方排空响应后再结束，避免半关闭协议丢失回包。
     let (mut cr, mut cw) = client.split();
     let (mut sr, mut sw) = server.split();
-    tokio::select! {
-        r = copy_with_idle(&mut cr, &mut sw) => r.map(|n| (n, 0)),
-        r = copy_with_idle(&mut sr, &mut cw) => r.map(|n| (0, n)),
-    }
+    let c2s = AtomicU64::new(0);
+    let s2c = AtomicU64::new(0);
+    let result = tokio::try_join!(
+        copy_with_idle(&mut cr, &mut sw, &c2s),
+        copy_with_idle(&mut sr, &mut cw, &s2c),
+    );
+    result.map(|_| (c2s.load(Ordering::Relaxed), s2c.load(Ordering::Relaxed)))
 }
 
-/// 单方向带空闲超时的 copy，EOF 时主动 shutdown 写端
-async fn copy_with_idle<R, W>(r: &mut R, w: &mut W) -> io::Result<u64>
+/// 单方向带空闲超时的 copy，边传边累加到 counter
+async fn copy_with_idle<R, W>(r: &mut R, w: &mut W, counter: &AtomicU64) -> io::Result<()>
 where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut buf = [0u8; 8192];
-    let mut total = 0u64;
     loop {
         let n = match timeout(TCP_IDLE_TIMEOUT, r.read(&mut buf)).await {
-            Ok(Ok(0)) => { w.shutdown().await.ok(); return Ok(total); }
+            Ok(Ok(0)) => { w.shutdown().await.ok(); return Ok(()); }
             Ok(Ok(n)) => n,
             Ok(Err(e)) => return Err(e),
             Err(_) => return Err(io::Error::new(io::ErrorKind::TimedOut, "TCP 空闲超时")),
         };
         w.write_all(&buf[..n]).await?;
-        total += n as u64;
+        counter.fetch_add(n as u64, Ordering::Relaxed);
     }
 }
 
@@ -486,6 +490,7 @@ mod zero_copy {
     use std::io;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
     use std::ptr;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use tokio::net::TcpStream;
 
     const CHUNK: usize = 65536;
@@ -503,16 +508,18 @@ mod zero_copy {
         let c_fd = client.as_raw_fd();
         let s_fd = server.as_raw_fd();
 
-        // brutal shutdown：任一方向关闭立即取消另一方向，连接不再悬挂
-        tokio::select! {
-            r = splice_half(client, server, c_fd, s_fd, c2s_rd.as_raw_fd(), c2s_wr.as_raw_fd()) =>
-                r.map(|n| (n, 0)),
-            r = splice_half(server, client, s_fd, c_fd, s2c_rd.as_raw_fd(), s2c_wr.as_raw_fd()) =>
-                r.map(|n| (0, n)),
-        }
+        let c2s = AtomicU64::new(0);
+        let s2c = AtomicU64::new(0);
+
+        // try_join!：出错立即取消另一方向，正常 EOF 则等对端排空，避免丢失回包。
+        let result = tokio::try_join!(
+            splice_half(client, server, c_fd, s_fd, c2s_rd.as_raw_fd(), c2s_wr.as_raw_fd(), &c2s),
+            splice_half(server, client, s_fd, c_fd, s2c_rd.as_raw_fd(), s2c_wr.as_raw_fd(), &s2c),
+        );
+        result.map(|_| (c2s.load(Ordering::Relaxed), s2c.load(Ordering::Relaxed)))
     }
 
-    /// 单方向 splice 循环：src_fd → pipe → dst_fd
+    /// 单方向 splice 循环：src_fd → pipe → dst_fd，边传边累加 counter
     async fn splice_half(
         src: &TcpStream,
         dst: &TcpStream,
@@ -520,9 +527,8 @@ mod zero_copy {
         dst_fd: RawFd,
         pipe_rd: RawFd,
         pipe_wr: RawFd,
-    ) -> io::Result<u64> {
-        let mut total = 0u64;
-
+        counter: &AtomicU64,
+    ) -> io::Result<()> {
         loop {
             let n = loop {
                 match tokio::time::timeout(super::TCP_IDLE_TIMEOUT, src.readable()).await {
@@ -534,11 +540,10 @@ mod zero_copy {
                     libc::splice(src_fd, ptr::null_mut(), pipe_wr, ptr::null_mut(), CHUNK,
                         libc::SPLICE_F_MOVE | libc::SPLICE_F_NONBLOCK)
                 };
-                if n == 0 { return Ok(total); }
+                if n == 0 { return Ok(()); }
                 if n < 0 {
                     let e = io::Error::last_os_error();
                     if e.kind() == io::ErrorKind::WouldBlock {
-                        // 显式等下一个可读事件，避免 tokio tick 误判
                         src.readable().await?;
                         continue;
                     }
@@ -567,7 +572,7 @@ mod zero_copy {
                 rem -= m as usize;
             }
 
-            total += n as u64;
+            counter.fetch_add(n as u64, Ordering::Relaxed);
         }
     }
 
