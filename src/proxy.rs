@@ -503,11 +503,8 @@ mod zero_copy {
 
         loop {
             let n = loop {
-                let mut guard = match tokio::time::timeout(
-                    super::TCP_IDLE_TIMEOUT,
-                    src.readable(),
-                ).await {
-                    Ok(Ok(g)) => g,
+                match tokio::time::timeout(super::TCP_IDLE_TIMEOUT, src.readable()).await {
+                    Ok(Ok(())) => {}
                     Ok(Err(e)) => return Err(e),
                     Err(_) => return Err(io::Error::new(io::ErrorKind::TimedOut, "TCP 空闲超时")),
                 };
@@ -518,10 +515,7 @@ mod zero_copy {
                 if n == 0 { return Ok(total); }
                 if n < 0 {
                     let e = io::Error::last_os_error();
-                    if e.kind() == io::ErrorKind::WouldBlock {
-                        guard.clear_ready();
-                        continue;
-                    }
+                    if e.kind() == io::ErrorKind::WouldBlock { continue; }
                     return Err(e);
                 }
                 break n as usize;
@@ -536,8 +530,7 @@ mod zero_copy {
                 if m < 0 {
                     let e = io::Error::last_os_error();
                     if e.kind() == io::ErrorKind::WouldBlock {
-                        let mut guard = dst.writable().await?;
-                        guard.clear_ready();
+                        dst.writable().await?;
                         continue;
                     }
                     return Err(e);
