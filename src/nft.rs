@@ -146,7 +146,16 @@ fn append_single(
             ));
         }
         Listen::Range(sport_start, sport_end) => {
-            let dport_end = t.target.port_start + r.listen.size();
+            let dport_end = match t.target.port_start.checked_add(r.listen.size()) {
+                Some(v) => v,
+                None => {
+                    log::error!(
+                        "目标端口段溢出 u16：{}:{} + 端口段大小 {}，跳过规则 [{}]",
+                        t.ip, t.target.port_start, r.listen.size(), cmt
+                    );
+                    return;
+                }
+            };
             let dnat = if is_ipv6 {
                 format!("[{}]:{}-{}", t.ip, t.target.port_start, dport_end)
             } else {
