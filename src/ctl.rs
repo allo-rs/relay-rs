@@ -689,7 +689,11 @@ fn extract_comment(s: &str) -> String {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max { s.to_string() } else { format!("{}…", &s[..max - 3]) }
+    if s.len() <= max { return s.to_string(); }
+    // 避免切在 UTF-8 多字节字符中间：回退到最近的 char boundary
+    let mut end = max.saturating_sub(3);
+    while end > 0 && !s.is_char_boundary(end) { end -= 1; }
+    format!("{}…", &s[..end])
 }
 
 fn format_packets(n: u64) -> String {
