@@ -276,12 +276,11 @@ async fn listen_udp_rule(rule: ForwardRule, port: u16, port_offset: u16, dns_cac
 
         // 查找或创建 per-client 的出站 UdpSocket
         let target_sock: Arc<UdpSocket> = {
-            // 先用读锁检查是否已有 session（多数情况下命中，无需写锁）
-            let existing = sessions.read().unwrap().get(&client_addr).cloned();
-            if let Some(s) = existing {
+            // 快路径：读锁命中（绝大多数情况）
+            if let Some(s) = sessions.read().unwrap().get(&client_addr).cloned() {
                 s
             } else {
-                // 绑定到随机端口，connect 到目标
+                // 慢路径：创建新 socket，await 期间不持有任何锁
                 let sock = match UdpSocket::bind("0.0.0.0:0").await {
                     Ok(s) => s,
                     Err(e) => { log::warn!("UDP 出站 socket bind 失败: {}", e); continue; }
@@ -291,38 +290,43 @@ async fn listen_udp_rule(rule: ForwardRule, port: u16, port_offset: u16, dns_cac
                     continue;
                 }
                 let sock = Arc::new(sock);
-                sessions.write().unwrap().insert(client_addr, sock.clone());
+                // 写锁内再次检查（TOCTOU 防护）：await 期间可能已有其他任务插入同一 client
+                let mut map = sessions.write().unwrap();
+                if let Some(existing) = map.get(&client_addr).cloned() {
+                    existing // 复用已有 session，丢弃刚创建的 sock
+                } else {
+                    map.insert(client_addr, sock.clone());
+                    drop(map);
 
-                // spawn 回包任务：target → client
-                let sock_rx = sock.clone();
-                let local_sock_tx = local_sock.clone();
-                let sessions_gc = sessions.clone();
-                tokio::spawn(async move {
-                    let mut rbuf = vec![0u8; UDP_BUF_SIZE];
-                    loop {
-                        match timeout(UDP_IDLE_TIMEOUT, sock_rx.recv(&mut rbuf)).await {
-                            Ok(Ok(m)) => {
-                                if let Err(e) = local_sock_tx.send_to(&rbuf[..m], client_addr).await {
-                                    log::debug!("UDP 回包 → {} 失败: {}", client_addr, e);
+                    // spawn 回包任务：target → client
+                    let sock_rx = sock.clone();
+                    let local_sock_tx = local_sock.clone();
+                    let sessions_gc = sessions.clone();
+                    tokio::spawn(async move {
+                        let mut rbuf = vec![0u8; UDP_BUF_SIZE];
+                        loop {
+                            match timeout(UDP_IDLE_TIMEOUT, sock_rx.recv(&mut rbuf)).await {
+                                Ok(Ok(m)) => {
+                                    if let Err(e) = local_sock_tx.send_to(&rbuf[..m], client_addr).await {
+                                        log::debug!("UDP 回包 → {} 失败: {}", client_addr, e);
+                                        break;
+                                    }
+                                }
+                                Ok(Err(e)) => {
+                                    log::debug!("UDP recv 失败 ({}): {}", client_addr, e);
+                                    break;
+                                }
+                                Err(_) => {
+                                    log::debug!("UDP session 超时，清除: {}", client_addr);
                                     break;
                                 }
                             }
-                            Ok(Err(e)) => {
-                                log::debug!("UDP recv 失败 ({}): {}", client_addr, e);
-                                break;
-                            }
-                            Err(_) => {
-                                // 120s 空闲超时，清除 session
-                                log::debug!("UDP session 超时，清除: {}", client_addr);
-                                break;
-                            }
                         }
-                    }
-                    // 从 sessions map 中移除
-                    sessions_gc.write().unwrap().remove(&client_addr);
-                });
+                        sessions_gc.write().unwrap().remove(&client_addr);
+                    });
 
-                sock
+                    sock
+                }
             }
         };
 

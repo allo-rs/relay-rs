@@ -4,6 +4,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const DEFAULT_TTL: Duration = Duration::from_secs(60);
+/// 最多缓存的条目数，防止内存无界增长（超出时淘汰最早过期的条目）
+const MAX_ENTRIES: usize = 1024;
 
 struct Entry {
     addrs: Vec<SocketAddr>,
@@ -55,6 +57,14 @@ impl DnsCache {
         // 写缓存
         {
             let mut cache = self.inner.lock().unwrap();
+            // 超出上限时淘汰所有已过期条目；若仍满则放弃缓存（不阻塞请求）
+            if cache.len() >= MAX_ENTRIES {
+                let now = Instant::now();
+                cache.retain(|_, e| e.expires > now);
+                if cache.len() >= MAX_ENTRIES {
+                    return Ok(addr);
+                }
+            }
             cache.insert(key, Entry {
                 addrs: addrs.clone(),
                 expires: Instant::now() + DEFAULT_TTL,
