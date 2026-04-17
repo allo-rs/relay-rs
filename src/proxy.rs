@@ -392,9 +392,11 @@ async fn relay(
         }
     };
 
-    // 双向开启 TCP keepalive，让 OS 探测死连接（断网/崩溃等）
+    // 双向开启 TCP keepalive + 禁用 Nagle 算法
     apply_keepalive(&client);
     apply_keepalive(&server);
+    let _ = client.set_nodelay(true);
+    let _ = server.set_nodelay(true);
 
     let result = do_relay(&mut client, &mut server).await;
 
