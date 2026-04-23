@@ -55,6 +55,7 @@ async function proxyToBackend(req: Request, path: string): Promise<Response> {
       method: req.method,
       headers: req.headers,
       body: noBody ? undefined : req.body,
+      redirect: "manual",
     });
   } catch (e) {
     console.error("[dev] proxy error:", e);
