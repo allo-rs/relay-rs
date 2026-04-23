@@ -14,6 +14,8 @@ SERVICE_FILE="/etc/systemd/system/relay-rs.service"
 PORT=9090
 PUBKEY_B64=""
 
+[[ $EUID -ne 0 ]] && { echo "请以 root 运行"; exit 1; }
+
 # ── 解析参数 ──────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -37,9 +39,21 @@ case "$ARCH" in
   *) echo "不支持的架构: $ARCH"; exit 1 ;;
 esac
 
+# ── 选择下载代理 ──────────────────────────────────────────────────
+_PROXY_DEFAULT="https://gh-proxy.org/"
+if [[ -z "${GITHUB_PROXY+x}" ]]; then
+  if curl -fsSL --connect-timeout 5 --max-time 8 -o /dev/null "https://github.com" 2>/dev/null; then
+    GITHUB_PROXY=""
+  else
+    echo "GitHub 直连慢，启用代理 $_PROXY_DEFAULT"
+    GITHUB_PROXY="$_PROXY_DEFAULT"
+  fi
+fi
+
 # ── 下载二进制 ────────────────────────────────────────────────────
 echo "▶ 获取最新版本..."
-VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
+VERSION=$(curl -fsSL --connect-timeout 10 --max-time 30 \
+  "https://api.github.com/repos/$REPO/releases/latest" \
   | grep '"tag_name"' | head -1 | cut -d'"' -f4)
 
 if [[ -z "$VERSION" ]]; then
@@ -47,10 +61,12 @@ if [[ -z "$VERSION" ]]; then
   exit 1
 fi
 
-BIN_URL="https://github.com/$REPO/releases/download/$VERSION/relay-rs-$BIN_ARCH"
+BIN_URL="${GITHUB_PROXY}https://github.com/$REPO/releases/download/$VERSION/relay-rs-$BIN_ARCH"
 echo "▶ 下载 relay-rs $VERSION ($BIN_ARCH)..."
-curl -fsSL "$BIN_URL" -o "$INSTALL_BIN"
-chmod +x "$INSTALL_BIN"
+TMP_BIN=$(mktemp)
+curl -fsSL --connect-timeout 10 --max-time 120 "$BIN_URL" -o "$TMP_BIN" || { rm -f "$TMP_BIN"; exit 1; }
+chmod +x "$TMP_BIN"
+mv "$TMP_BIN" "$INSTALL_BIN"
 
 # ── 写入配置 ──────────────────────────────────────────────────────
 echo "▶ 写入配置 $CONFIG_FILE..."
