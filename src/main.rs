@@ -78,6 +78,8 @@ enum Command {
     Stats,
     /// 初始化面板：生成 Ed25519 主控密钥（master 模式首次运行）
     PanelInit,
+    /// 清除 DB 中的 Discourse 登录配置（恢复开放模式，用于锁死救援）
+    PanelResetAuth,
     /// 以守护进程模式运行（供 systemd 调用）
     #[command(hide = true)]
     Daemon,
@@ -196,6 +198,7 @@ fn run_ctl(cmd: Command, config: &str, interval: u64) {
             }
         }
         Command::PanelInit => panel_init(config),
+        Command::PanelResetAuth => panel_reset_auth(config),
     }
 }
 
@@ -213,7 +216,6 @@ fn panel_init(config_path: &str) {
         master_pubkey: None,
         tls_cert: None,
         tls_key: None,
-        discourse: None,
         nodes: Vec::new(),
         database_url: None,
     });
@@ -241,14 +243,45 @@ fn panel_init(config_path: &str) {
     if panel.secret.is_empty() {
         eprintln!("⚠️  panel.secret 为空，请手动填写一个随机字符串用于签发面板登录 JWT。");
     }
-    if panel.discourse.is_none() {
-        eprintln!("⚠️  未配置 [panel.discourse]，面板将无法登录。请参考配置示例添加 url/secret。");
-    }
+    println!("💡 Discourse 登录配置现在在面板 UI 的「设置」页中填写（首次访问 panel 无需登录）。");
 
     match config::save(&cfg, config_path) {
         Ok(_) => println!("面板配置已保存：{}", config_path),
         Err(e) => { eprintln!("保存失败: {}", e); std::process::exit(1); }
     }
+}
+
+/// 清除 DB 中的 Discourse 登录配置，恢复开放访问模式
+fn panel_reset_auth(config_path: &str) {
+    let cfg = match config::load(config_path) {
+        Ok(c) => c,
+        Err(e) => { eprintln!("读取配置失败: {}", e); std::process::exit(1); }
+    };
+    let panel = match cfg.panel {
+        Some(p) => p,
+        None => { eprintln!("配置中无 [panel] 段"); std::process::exit(1); }
+    };
+    let db_url = match &panel.database_url {
+        Some(u) if !u.is_empty() => u.clone(),
+        _ => { eprintln!("panel.database_url 为空"); std::process::exit(1); }
+    };
+
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(r) => r,
+        Err(e) => { eprintln!("创建 tokio runtime 失败: {}", e); std::process::exit(1); }
+    };
+
+    rt.block_on(async move {
+        let pool = match db::connect(&db_url).await {
+            Ok(p) => p,
+            Err(e) => { eprintln!("连接数据库失败: {}", e); std::process::exit(1); }
+        };
+        match db::delete_setting(&pool, "discourse").await {
+            Ok(true) => println!("✅ 已清除 Discourse 登录配置，panel 将回到开放模式（无需重启）。"),
+            Ok(false) => println!("ℹ️  未配置 Discourse，无需清除。"),
+            Err(e) => { eprintln!("清除失败: {}", e); std::process::exit(1); }
+        }
+    });
 }
 
 // ── 主菜单 ───────────────────────────────────────────────────────

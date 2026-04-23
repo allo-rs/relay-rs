@@ -27,7 +27,7 @@ const NAV_ITEMS: NavItem[] = [
 
 export default function DynamicIsland() {
   const navigate = useNavigate();
-  const { user, clear } = useCurrentUser();
+  const { user, configured, clear } = useCurrentUser();
 
   async function handleLogout() {
     try {
@@ -86,8 +86,15 @@ export default function DynamicIsland() {
 
         <div className="h-4 w-px bg-white/15 mx-1" />
 
+        {/* 未配置模式提示 */}
+        {!configured && (
+          <div className="flex items-center gap-1.5 pl-1 pr-2 text-xs text-amber-300">
+            <span>开放模式</span>
+          </div>
+        )}
+
         {/* 当前用户 */}
-        {user && (
+        {configured && user && (
           <div className="flex items-center gap-2 pl-1 pr-2">
             {user.avatar ? (
               <img
@@ -112,18 +119,20 @@ export default function DynamicIsland() {
           </div>
         )}
 
-        {/* 退出 */}
-        <button
-          onClick={handleLogout}
-          title="退出登录"
-          className={cn(
-            "flex items-center justify-center rounded-full h-7 w-7",
-            "text-background/70 hover:text-background hover:bg-white/10",
-            "transition-colors"
-          )}
-        >
-          <LogOut className="h-3.5 w-3.5" />
-        </button>
+        {/* 退出（仅已配置 + 已登录时显示） */}
+        {configured && user && (
+          <button
+            onClick={handleLogout}
+            title="退出登录"
+            className={cn(
+              "flex items-center justify-center rounded-full h-7 w-7",
+              "text-background/70 hover:text-background hover:bg-white/10",
+              "transition-colors"
+            )}
+          >
+            <LogOut className="h-3.5 w-3.5" />
+          </button>
+        )}
       </nav>
     </header>
   );

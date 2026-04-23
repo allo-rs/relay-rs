@@ -4,7 +4,7 @@ import { useCurrentUser } from "@/lib/CurrentUser";
 
 // 需要登录的路由守卫，未登录则跳转 /login
 export default function PrivateRoute() {
-  const { user, loading } = useCurrentUser();
+  const { user, configured, loading } = useCurrentUser();
   const loc = useLocation();
 
   if (loading) {
@@ -13,6 +13,11 @@ export default function PrivateRoute() {
         <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
       </div>
     );
+  }
+
+  // 未配置 Discourse：开放模式，直接放行（后端也不校验）
+  if (!configured) {
+    return <Outlet />;
   }
 
   if (!user) {

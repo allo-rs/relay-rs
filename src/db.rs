@@ -1,4 +1,5 @@
 use sqlx::{postgres::PgPoolOptions, PgPool, Row};
+use serde_json::Value;
 
 pub struct Node {
     pub id: i32,
@@ -22,7 +23,44 @@ pub async fn ensure_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
     )
     .execute(pool)
     .await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS settings (
+            key        TEXT        PRIMARY KEY,
+            value      JSONB       NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )",
+    )
+    .execute(pool)
+    .await?;
     Ok(())
+}
+
+pub async fn get_setting(pool: &PgPool, key: &str) -> Result<Option<Value>, sqlx::Error> {
+    let row = sqlx::query("SELECT value FROM settings WHERE key = $1")
+        .bind(key)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.map(|r| r.get::<Value, _>("value")))
+}
+
+pub async fn set_setting(pool: &PgPool, key: &str, value: &Value) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, NOW())
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
+    )
+    .bind(key)
+    .bind(value)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn delete_setting(pool: &PgPool, key: &str) -> Result<bool, sqlx::Error> {
+    let r = sqlx::query("DELETE FROM settings WHERE key = $1")
+        .bind(key)
+        .execute(pool)
+        .await?;
+    Ok(r.rows_affected() > 0)
 }
 
 pub async fn list_nodes(pool: &PgPool) -> Result<Vec<Node>, sqlx::Error> {

@@ -1,13 +1,31 @@
-import { Radio, MessageSquare } from "lucide-react";
+import { Radio, MessageSquare, Loader2 } from "lucide-react";
+import { Navigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { redirectToDiscourseLogin } from "@/lib/auth";
+import { useCurrentUser } from "@/lib/CurrentUser";
 
 export default function Login() {
+  const { configured, loading } = useCurrentUser();
+
   function handleLogin() {
     const params = new URLSearchParams(window.location.search);
     const next = params.get("next") ?? "/";
     redirectToDiscourseLogin(next);
+  }
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
+  if (!configured) {
+    const params = new URLSearchParams(window.location.search);
+    const next = params.get("next") ?? "/";
+    return <Navigate to={next} replace />;
   }
 
   return (
@@ -35,6 +53,18 @@ export default function Login() {
             </p>
           </CardContent>
         </Card>
+
+        <details className="text-xs text-muted-foreground">
+          <summary className="cursor-pointer hover:text-foreground transition-colors">
+            无法登录？重置 Discourse 配置
+          </summary>
+          <div className="mt-2 space-y-2 rounded-md border bg-background/50 p-3">
+            <p>在服务器执行下列命令清除 Discourse 配置，面板将回到开放模式，可重新在「设置」页配置：</p>
+            <pre className="text-[11px] bg-muted px-2 py-1.5 rounded font-mono overflow-x-auto">
+              relay-rs panel-reset-auth
+            </pre>
+          </div>
+        </details>
       </div>
     </div>
   );

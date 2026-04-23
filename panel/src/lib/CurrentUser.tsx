@@ -1,18 +1,19 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
-import { fetchCurrentUser } from "@/lib/auth";
+import { fetchAuthState } from "@/lib/auth";
 import type { CurrentUser } from "@/lib/types";
 
 type Ctx = {
   user: CurrentUser | null;
+  /** 系统是否已配置 Discourse；未配置时 panel 开放访问 */
+  configured: boolean;
   loading: boolean;
-  /** 重新拉取当前登录信息 */
   refresh: () => Promise<void>;
-  /** 本地清除（不调用后端 /logout） */
   clear: () => void;
 };
 
 const CurrentUserContext = createContext<Ctx>({
   user: null,
+  configured: true,
   loading: true,
   refresh: async () => {},
   clear: () => {},
@@ -20,13 +21,15 @@ const CurrentUserContext = createContext<Ctx>({
 
 export function CurrentUserProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<CurrentUser | null>(null);
+  const [configured, setConfigured] = useState(true);
   const [loading, setLoading] = useState(true);
 
   async function refresh() {
     setLoading(true);
     try {
-      const u = await fetchCurrentUser();
-      setUser(u);
+      const s = await fetchAuthState();
+      setUser(s.user);
+      setConfigured(s.configured);
     } catch {
       setUser(null);
     } finally {
@@ -37,7 +40,6 @@ export function CurrentUserProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     void refresh();
 
-    // 接收全局 401 事件，清空并由 PrivateRoute 跳转
     function onUnauthorized() {
       setUser(null);
     }
@@ -47,7 +49,7 @@ export function CurrentUserProvider({ children }: { children: ReactNode }) {
 
   return (
     <CurrentUserContext.Provider
-      value={{ user, loading, refresh, clear: () => setUser(null) }}
+      value={{ user, configured, loading, refresh, clear: () => setUser(null) }}
     >
       {children}
     </CurrentUserContext.Provider>

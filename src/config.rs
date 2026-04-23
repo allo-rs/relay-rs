@@ -113,14 +113,6 @@ pub struct NodeEntry {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct DiscourseConfig {
-    /// Discourse 站点 URL，如 "https://forum.example.com"
-    pub url: String,
-    /// 与 Discourse 后台 "SSO Provider" 共享的 secret
-    pub secret: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct PanelConfig {
     #[serde(default)]
     pub mode: PanelMode,
@@ -140,9 +132,6 @@ pub struct PanelConfig {
     pub tls_cert: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_key: Option<String>,
-    /// Discourse Connect（SSO Provider）配置，master 模式下的唯一登录方式
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub discourse: Option<DiscourseConfig>,
     /// master 管理的 node 列表（有 database_url 时由数据库管理，此字段忽略）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub nodes: Vec<NodeEntry>,

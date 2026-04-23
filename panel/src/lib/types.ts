@@ -43,6 +43,19 @@ export interface CurrentUser {
   admin: boolean;
 }
 
+export interface MeResponse {
+  ok: true;
+  configured: boolean;
+  user: CurrentUser;
+}
+
+export interface DiscourseSetting {
+  ok: true;
+  configured: boolean;
+  url: string;
+  hasSecret: boolean;
+}
+
 export interface OkResponse {
   ok: true;
 }
