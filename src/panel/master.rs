@@ -11,12 +11,19 @@ use rcgen;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::PgPool;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tower_http::cors::CorsLayer;
 
 use crate::config::PanelConfig;
 use crate::panel::auth::AUTH_COOKIE;
 use crate::panel::discourse::{self as discourse, NonceStore};
+
+/// 运行时 Discourse 配置（来自 DB，可热更新）
+#[derive(Clone, Debug)]
+pub struct DiscourseRuntime {
+    pub url: String,
+    pub secret: String,
+}
 
 #[derive(Clone)]
 struct MasterState {
@@ -24,6 +31,33 @@ struct MasterState {
     http_client: reqwest::Client,
     db: PgPool,
     nonces: Arc<NonceStore>,
+    /// 运行时 Discourse 配置缓存；None 表示「未配置」，此时 panel 开放访问
+    discourse: Arc<RwLock<Option<DiscourseRuntime>>>,
+}
+
+impl MasterState {
+    fn discourse(&self) -> Option<DiscourseRuntime> {
+        self.discourse.read().ok().and_then(|g| g.clone())
+    }
+
+    async fn reload_discourse(&self) {
+        match crate::db::get_setting(&self.db, "discourse").await {
+            Ok(Some(v)) => {
+                let url = v.get("url").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+                let secret = v.get("secret").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                let rt = if !url.is_empty() && !secret.is_empty() {
+                    Some(DiscourseRuntime { url, secret })
+                } else {
+                    None
+                };
+                if let Ok(mut g) = self.discourse.write() { *g = rt; }
+            }
+            Ok(None) => {
+                if let Ok(mut g) = self.discourse.write() { *g = None; }
+            }
+            Err(e) => log::warn!("读取 settings.discourse 失败: {}", e),
+        }
+    }
 }
 
 fn is_public_path(path: &str) -> bool {
@@ -33,9 +67,13 @@ fn is_public_path(path: &str) -> bool {
     )
 }
 
-/// JWT 认证中间件：从 HttpOnly cookie 读取
+/// JWT 认证中间件：从 HttpOnly cookie 读取；未配置 Discourse 时放行
 async fn jwt_middleware(State(state): State<MasterState>, req: Request, next: Next) -> Response {
     if is_public_path(req.uri().path()) {
+        return next.run(req).await;
+    }
+    // 未配置 Discourse → 开放访问
+    if state.discourse().is_none() {
         return next.run(req).await;
     }
     let token = super::auth::extract_cookie(req.headers(), AUTH_COOKIE);
@@ -55,6 +93,8 @@ fn unauthorized(msg: &str) -> Response {
 pub fn router(panel_cfg: PanelConfig, _config_path: String, db: PgPool) -> Router {
     let http_client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
+        .timeout(std::time::Duration::from_secs(3))
+        .connect_timeout(std::time::Duration::from_secs(2))
         .build()
         .unwrap();
 
@@ -63,7 +103,19 @@ pub fn router(panel_cfg: PanelConfig, _config_path: String, db: PgPool) -> Route
         http_client,
         db,
         nonces: Arc::new(NonceStore::new()),
+        discourse: Arc::new(RwLock::new(None)),
     };
+
+    // 启动时 + 每 30 秒异步刷新 Discourse 配置缓存（支持 CLI reset-auth 生效）
+    {
+        let s = state.clone();
+        tokio::spawn(async move {
+            loop {
+                s.reload_discourse().await;
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            }
+        });
+    }
 
     let api = Router::new()
         // 认证
@@ -71,6 +123,13 @@ pub fn router(panel_cfg: PanelConfig, _config_path: String, db: PgPool) -> Route
         .route("/api/auth/discourse/callback", get(handle_discourse_callback))
         .route("/api/auth/me", get(handle_me))
         .route("/api/auth/logout", post(handle_logout))
+        // 设置
+        .route(
+            "/api/settings/discourse",
+            get(handle_get_discourse_setting)
+                .put(handle_put_discourse_setting)
+                .delete(handle_delete_discourse_setting),
+        )
         // 节点
         .route("/api/nodes", get(handle_list_nodes).post(handle_add_node))
         .route("/api/nodes/{id}", delete(handle_del_node))
@@ -83,6 +142,7 @@ pub fn router(panel_cfg: PanelConfig, _config_path: String, db: PgPool) -> Route
         .route("/api/nodes/{id}/rules/block/{idx}", delete(handle_node_del_block))
         .route("/api/nodes/{id}/stats", get(handle_node_stats))
         .route("/api/nodes/{id}/reload", post(handle_node_reload))
+        .route("/api/pubkey", get(handle_pubkey))
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(state.clone(), jwt_middleware));
 
@@ -108,9 +168,9 @@ async fn handle_discourse_login(
     Query(q): Query<LoginQuery>,
     req: Request,
 ) -> Response {
-    let disc = match &state.panel_cfg.discourse {
-        Some(d) if !d.url.is_empty() && !d.secret.is_empty() => d.clone(),
-        _ => {
+    let disc = match state.discourse() {
+        Some(d) => d,
+        None => {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(json!({ "error": "未配置 Discourse" })),
@@ -137,9 +197,9 @@ async fn handle_discourse_callback(
     State(state): State<MasterState>,
     Query(q): Query<CallbackQuery>,
 ) -> Response {
-    let disc = match &state.panel_cfg.discourse {
-        Some(d) if !d.url.is_empty() && !d.secret.is_empty() => d.clone(),
-        _ => return login_failed("未配置 Discourse"),
+    let disc = match state.discourse() {
+        Some(d) => d,
+        None => return login_failed("未配置 Discourse"),
     };
 
     let mut return_to: Option<String> = None;
@@ -216,6 +276,23 @@ fn build_callback_url(req: &Request, panel_cfg: &PanelConfig) -> String {
 }
 
 async fn handle_me(State(state): State<MasterState>, req: Request) -> Response {
+    let configured = state.discourse().is_some();
+    if !configured {
+        // 未配置 Discourse：开放模式，返回一个占位的 setup 用户（admin=true）
+        return Json(json!({
+            "ok": true,
+            "configured": false,
+            "user": {
+                "id": "setup",
+                "username": "setup",
+                "name": "首次部署",
+                "email": null,
+                "avatar": null,
+                "admin": true,
+            }
+        }))
+        .into_response();
+    }
     let token = match super::auth::extract_cookie(req.headers(), AUTH_COOKIE) {
         Some(t) => t,
         None => return unauthorized("未登录"),
@@ -223,6 +300,7 @@ async fn handle_me(State(state): State<MasterState>, req: Request) -> Response {
     match super::auth::verify_user_token(&token, &state.panel_cfg.secret) {
         Ok(c) => Json(json!({
             "ok": true,
+            "configured": true,
             "user": {
                 "id": c.sub,
                 "username": c.username,
@@ -237,6 +315,82 @@ async fn handle_me(State(state): State<MasterState>, req: Request) -> Response {
     }
 }
 
+// ── 设置：Discourse 配置 ─────────────────────────────────────────
+
+async fn handle_get_discourse_setting(State(state): State<MasterState>) -> Response {
+    let d = state.discourse();
+    Json(json!({
+        "ok": true,
+        "configured": d.is_some(),
+        "url": d.as_ref().map(|x| x.url.clone()).unwrap_or_default(),
+        "hasSecret": d.is_some(),
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct DiscourseSettingBody {
+    url: String,
+    /// 可选：留空表示保持原 secret 不变
+    secret: Option<String>,
+}
+
+async fn handle_put_discourse_setting(
+    State(state): State<MasterState>,
+    Json(body): Json<DiscourseSettingBody>,
+) -> Response {
+    let url = body.url.trim().trim_end_matches('/').to_string();
+    if url.is_empty() || !(url.starts_with("http://") || url.starts_with("https://")) {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "url 需为 http(s):// 开头" })))
+            .into_response();
+    }
+
+    // 若 secret 为 None 或空，沿用旧 secret
+    let new_secret = match body.secret.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => s.to_string(),
+        None => match state.discourse() {
+            Some(d) => d.secret,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "首次配置必须提供 secret" })),
+                )
+                    .into_response();
+            }
+        },
+    };
+    if new_secret.len() < 10 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "secret 至少 10 字符" })),
+        )
+            .into_response();
+    }
+
+    let value = json!({ "url": url, "secret": new_secret });
+    if let Err(e) = crate::db::set_setting(&state.db, "discourse", &value).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("写入失败: {}", e) })),
+        )
+            .into_response();
+    }
+    state.reload_discourse().await;
+    Json(json!({ "ok": true, "configured": true, "url": url, "hasSecret": true })).into_response()
+}
+
+async fn handle_delete_discourse_setting(State(state): State<MasterState>) -> Response {
+    if let Err(e) = crate::db::delete_setting(&state.db, "discourse").await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("删除失败: {}", e) })),
+        )
+            .into_response();
+    }
+    state.reload_discourse().await;
+    Json(json!({ "ok": true, "configured": false })).into_response()
+}
+
 async fn handle_logout() -> Response {
     let expired = format!("{}=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax", AUTH_COOKIE);
     let mut resp = Json(json!({ "ok": true })).into_response();
@@ -246,32 +400,26 @@ async fn handle_logout() -> Response {
     resp
 }
 
+// ── 主控公钥 ──────────────────────────────────────────────────────
+
+async fn handle_pubkey(State(state): State<MasterState>) -> Response {
+    let pubkey = derive_pubkey_pem(state.panel_cfg.private_key.as_deref().unwrap_or(""));
+    Json(json!({ "pubkey": pubkey })).into_response()
+}
+
 // ── 节点 CRUD ─────────────────────────────────────────────────────
 
-/// GET /api/nodes — 从 DB 读节点列表并并发探活
+/// GET /api/nodes — 仅从 DB 读节点列表（不探活，状态由前端按需调用 /api/nodes/{id}/status）
 async fn handle_list_nodes(State(state): State<MasterState>) -> Response {
     let nodes = match crate::db::list_nodes(&state.db).await {
         Ok(n) => n,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
     };
-
-    let pk = state.panel_cfg.private_key.clone().unwrap_or_default();
-    let mut tasks = Vec::new();
-
-    for node in nodes {
-        let client = state.http_client.clone();
-        let pk = pk.clone();
-        tasks.push(tokio::spawn(async move {
-            let entry = mk_entry(&node.name, &node.url);
-            let status = proxy_to_node(&client, &entry, reqwest::Method::GET, "/api/status", None, &pk)
-                .await.ok();
-            json!({ "id": node.id, "name": node.name, "url": node.url, "status": status })
-        }));
-    }
-
-    let mut results = Vec::new();
-    for t in tasks { if let Ok(v) = t.await { results.push(v); } }
-    Json(json!({ "ok": true, "nodes": results })).into_response()
+    let list: Vec<Value> = nodes
+        .into_iter()
+        .map(|n| json!({ "id": n.id, "name": n.name, "url": n.url, "status": null }))
+        .collect();
+    Json(json!({ "ok": true, "nodes": list })).into_response()
 }
 
 #[derive(Deserialize)]
