@@ -1,22 +1,28 @@
-// JWT token 的 localStorage 管理
+// 认证状态（基于 HttpOnly cookie）
+//
+// Cookie 对前端 JS 不可见，所以无法在本地判断登录态；
+// 改由 PrivateRoute 调用 `/api/auth/me`，401 即未登录跳转。
 
-const TOKEN_KEY = "relay_rs_token";
+import type { CurrentUser } from "./types";
 
-export function getToken(): string | null {
-  return localStorage.getItem(TOKEN_KEY);
+const ME_PATH = "/api/auth/me";
+const LOGOUT_PATH = "/api/auth/logout";
+
+export async function fetchCurrentUser(): Promise<CurrentUser | null> {
+  const res = await fetch(ME_PATH, { credentials: "include" });
+  if (res.status === 401) return null;
+  if (!res.ok) throw new Error(`auth check failed: ${res.status}`);
+  const data = (await res.json()) as { ok: true; user: CurrentUser };
+  return data.user;
 }
 
-export function setToken(token: string): void {
-  localStorage.setItem(TOKEN_KEY, token);
+export async function logout(): Promise<void> {
+  await fetch(LOGOUT_PATH, { method: "POST", credentials: "include" });
 }
 
-export function clearToken(): void {
-  localStorage.removeItem(TOKEN_KEY);
-}
-
-export function isAuthenticated(): boolean {
-  const token = getToken();
-  if (!token) return false;
-  // 简单检查 token 格式（JWT 有三段）
-  return token.split(".").length === 3;
+/** 重定向到 Discourse 登录页，登录后回跳 current path */
+export function redirectToDiscourseLogin(next?: string): void {
+  const target = next ?? window.location.pathname + window.location.search;
+  const url = `/api/auth/discourse/login?next=${encodeURIComponent(target)}`;
+  window.location.href = url;
 }

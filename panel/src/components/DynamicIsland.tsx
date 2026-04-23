@@ -5,9 +5,11 @@ import {
   Server,
   Settings as SettingsIcon,
   LogOut,
+  ShieldCheck,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { clearToken } from "@/lib/auth";
+import { logout as apiLogout } from "@/lib/auth";
+import { useCurrentUser } from "@/lib/CurrentUser";
 
 type NavItem = {
   to: string;
@@ -25,9 +27,15 @@ const NAV_ITEMS: NavItem[] = [
 
 export default function DynamicIsland() {
   const navigate = useNavigate();
+  const { user, clear } = useCurrentUser();
 
-  function handleLogout() {
-    clearToken();
+  async function handleLogout() {
+    try {
+      await apiLogout();
+    } catch {
+      // 忽略网络错误，前端继续清理
+    }
+    clear();
     navigate("/login", { replace: true });
   }
 
@@ -41,7 +49,6 @@ export default function DynamicIsland() {
           "px-2 py-1.5"
         )}
       >
-        {/* 左侧 Logo 圆点 */}
         <div className="flex items-center gap-2 pl-2 pr-3">
           <span className="relative flex h-2 w-2">
             <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />
@@ -54,7 +61,6 @@ export default function DynamicIsland() {
 
         <div className="h-4 w-px bg-white/15" />
 
-        {/* 导航项 */}
         <ul className="flex items-center">
           {NAV_ITEMS.map(({ to, label, icon: Icon, end }) => (
             <li key={to}>
@@ -79,6 +85,32 @@ export default function DynamicIsland() {
         </ul>
 
         <div className="h-4 w-px bg-white/15 mx-1" />
+
+        {/* 当前用户 */}
+        {user && (
+          <div className="flex items-center gap-2 pl-1 pr-2">
+            {user.avatar ? (
+              <img
+                src={user.avatar}
+                alt={user.username}
+                className="h-6 w-6 rounded-full object-cover border border-white/20"
+              />
+            ) : (
+              <div className="h-6 w-6 rounded-full bg-white/15 flex items-center justify-center text-[10px] font-semibold">
+                {user.username.slice(0, 2).toUpperCase()}
+              </div>
+            )}
+            <div className="flex items-center gap-1 text-xs">
+              <span className="opacity-90">{user.username}</span>
+              {user.admin && (
+                <ShieldCheck
+                  className="h-3 w-3 text-emerald-400"
+                  aria-label="管理员"
+                />
+              )}
+            </div>
+          </div>
+        )}
 
         {/* 退出 */}
         <button

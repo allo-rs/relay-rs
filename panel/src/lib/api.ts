@@ -1,9 +1,6 @@
-// API 请求封装，使用原生 fetch
+// API 请求封装，使用原生 fetch + HttpOnly cookie
 
-import { getToken } from "./auth";
 import type {
-  LoginRequest,
-  LoginResponse,
   NodeInfo,
   NodeRules,
   ForwardRule,
@@ -11,22 +8,24 @@ import type {
   OkResponse,
 } from "./types";
 
-// 统一请求封装，自动附加 Authorization header
+// 统一请求封装，携带 cookie，401 时抛错由调用方处理
 async function apiFetch<T>(url: string, options: RequestInit = {}): Promise<T> {
-  const token = getToken();
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...(options.headers as Record<string, string>),
   };
 
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`;
-  }
-
   const res = await fetch(url, {
     ...options,
     headers,
+    credentials: "include",
   });
+
+  if (res.status === 401) {
+    // 触发全局未登录处理
+    window.dispatchEvent(new CustomEvent("app:unauthorized"));
+    throw new Error("未登录或会话已过期");
+  }
 
   if (!res.ok) {
     let message = `请求失败 (${res.status})`;
@@ -46,29 +45,7 @@ async function apiFetch<T>(url: string, options: RequestInit = {}): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-// 登录（不需要 token）
-export async function login(data: LoginRequest): Promise<LoginResponse> {
-  const res = await fetch("/api/auth/login", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
-  });
-
-  if (!res.ok) {
-    let message = "用户名或密码错误";
-    try {
-      const body = await res.json();
-      if (typeof body === "object" && body !== null && "message" in body) {
-        message = String((body as { message: unknown }).message);
-      }
-    } catch {
-      // 忽略
-    }
-    throw new Error(message);
-  }
-
-  return res.json() as Promise<LoginResponse>;
-}
+// 登录流程已改为 Discourse Connect（见 lib/auth.ts）——此处不再保留 login API。
 
 interface RawNodeStatus {
   ok?: boolean;

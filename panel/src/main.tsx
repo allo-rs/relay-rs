@@ -4,6 +4,7 @@ import { BrowserRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "sonner";
 import App from "./App";
+import { CurrentUserProvider } from "./lib/CurrentUser";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -21,7 +22,9 @@ createRoot(rootEl).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
-        <App />
+        <CurrentUserProvider>
+          <App />
+        </CurrentUserProvider>
         <Toaster richColors position="top-right" />
       </BrowserRouter>
     </QueryClientProvider>

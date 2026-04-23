@@ -34,13 +34,13 @@ export interface NodeInfo {
   mode?: "nat" | "relay";
 }
 
-export interface LoginRequest {
+export interface CurrentUser {
+  id: string;
   username: string;
-  password: string;
-}
-
-export interface LoginResponse {
-  token: string;
+  name?: string | null;
+  email?: string | null;
+  avatar?: string | null;
+  admin: boolean;
 }
 
 export interface OkResponse {
