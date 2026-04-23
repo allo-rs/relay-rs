@@ -52,3 +52,35 @@ comment = "禁止外部访问 MySQL"
 src = "2001:db8::1"
 ipv6 = true
 comment = "封禁 IPv6 地址"
+
+# ── 面板配置 ────────────────────────────────────────────────────────
+# mode:     node（被主控管理）| master（主控，含 Web 面板）
+# listen:   监听地址，如 "0.0.0.0:9090"
+# secret:   node 模式：API 认证 token；master 模式：JWT 签名密钥
+# tls_cert/tls_key: 可选，不填自动生成自签名证书到 /etc/relay-rs/
+
+# -- Node 模式示例 --
+# [panel]
+# mode = "node"
+# listen = "0.0.0.0:9090"
+# secret = "your-node-secret-token"
+
+# -- Master 模式示例 --
+# [panel]
+# mode = "master"
+# listen = "0.0.0.0:9090"
+# secret = "your-jwt-signing-secret"   # 必须足够随机
+#
+# [panel.auth]
+# username = "admin"
+# password = "$2b$12$..."              # 用 relay-rs panel-passwd 命令生成
+#
+# [[panel.nodes]]
+# name  = "节点1-香港"
+# url   = "https://1.2.3.4:9090"
+# token = "node1-secret-token"
+#
+# [[panel.nodes]]
+# name  = "节点2-日本"
+# url   = "https://5.6.7.8:9090"
+# token = "node2-secret-token"
