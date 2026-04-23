@@ -92,7 +92,7 @@ export default function Nodes() {
       {!isLoading && nodes && nodes.length > 0 && (
         <>
           <div className="text-xs text-muted-foreground mb-3">
-            共 {nodes.length} 个节点，{nodes.filter((n) => n.online).length} 个在线
+            共 {nodes.length} 个节点
           </div>
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {nodes.map((node) => (

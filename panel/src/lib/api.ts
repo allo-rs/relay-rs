@@ -65,7 +65,7 @@ interface NodeListResponse {
   nodes: RawNodeItem[];
 }
 
-// 获取所有节点列表，将后端 { ok, nodes } 结构转换为 NodeInfo[]
+// 获取所有节点列表（仅 DB 数据，状态由 NodeCard 异步获取）
 export function getNodes(): Promise<NodeInfo[]> {
   return apiFetch<NodeListResponse>("/api/nodes").then((res) =>
     res.nodes.map((n) => ({
@@ -77,6 +77,21 @@ export function getNodes(): Promise<NodeInfo[]> {
       mode: n.status?.mode as NodeInfo["mode"] | undefined,
     }))
   );
+}
+
+// 单独探活一个节点
+export function getNodeStatus(id: number): Promise<{
+  online: boolean;
+  version?: string;
+  mode?: NodeInfo["mode"];
+}> {
+  return apiFetch<RawNodeStatus>(`/api/nodes/${id}/status`)
+    .then((s) => ({
+      online: s.ok === true,
+      version: s.version,
+      mode: s.mode as NodeInfo["mode"] | undefined,
+    }))
+    .catch(() => ({ online: false }));
 }
 
 // 获取指定节点的规则

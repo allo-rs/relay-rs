@@ -10,7 +10,7 @@ import StatsView from "@/components/StatsView";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { getNodes, getNodeRules, reloadNode, getMasterPubkey } from "@/lib/api";
+import { getNodes, getNodeStatus, getNodeRules, reloadNode, getMasterPubkey } from "@/lib/api";
 
 export default function NodeDetail() {
   const { id } = useParams<{ id: string }>();
@@ -32,7 +32,14 @@ export default function NodeDetail() {
   });
   const node = nodes?.find((n) => n.id === nodeId);
 
-  const nodeOnline = node?.online === true;
+  // 独立查询节点在线状态（复用 NodeCard 的 cache key，避免重复请求）
+  const { data: statusData } = useQuery({
+    queryKey: ["node-status", nodeId],
+    queryFn: () => getNodeStatus(nodeId),
+    refetchInterval: 30_000,
+    staleTime: 10_000,
+  });
+  const nodeOnline = statusData?.online === true;
   const [copied, setCopied] = useState(false);
 
   // 拉取主控公钥（仅节点离线且节点信息已加载时）

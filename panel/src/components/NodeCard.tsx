@@ -1,5 +1,6 @@
 import { useNavigate } from "react-router-dom";
-import { Wifi, WifiOff, ArrowRight, Trash2 } from "lucide-react";
+import { Wifi, WifiOff, Loader2, ArrowRight, Trash2 } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
 import {
   Card,
   CardHeader,
@@ -10,6 +11,7 @@ import {
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { getNodeStatus } from "@/lib/api";
 import type { NodeInfo } from "@/lib/types";
 
 interface NodeCardProps {
@@ -20,6 +22,17 @@ interface NodeCardProps {
 export default function NodeCard({ node, onDelete }: NodeCardProps) {
   const navigate = useNavigate();
 
+  const { data: status, isLoading: statusLoading } = useQuery({
+    queryKey: ["node-status", node.id],
+    queryFn: () => getNodeStatus(node.id),
+    refetchInterval: 30_000,
+    staleTime: 10_000,
+  });
+
+  const online = status?.online ?? false;
+  const version = status?.version;
+  const mode = status?.mode;
+
   return (
     <Card
       className="cursor-pointer hover:shadow-md transition-shadow"
@@ -28,23 +41,30 @@ export default function NodeCard({ node, onDelete }: NodeCardProps) {
       <CardHeader className="pb-2">
         <div className="flex items-start justify-between gap-2">
           <CardTitle className="text-lg truncate">{node.name}</CardTitle>
-          <Badge variant={node.online ? "success" : "destructive"} className="shrink-0">
-            {node.online ? (
-              <><Wifi className="h-3 w-3 mr-1" />在线</>
-            ) : (
-              <><WifiOff className="h-3 w-3 mr-1" />离线</>
-            )}
-          </Badge>
+          {statusLoading ? (
+            <Badge variant="outline" className="shrink-0 gap-1">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              检测中
+            </Badge>
+          ) : (
+            <Badge variant={online ? "success" : "destructive"} className="shrink-0">
+              {online ? (
+                <><Wifi className="h-3 w-3 mr-1" />在线</>
+              ) : (
+                <><WifiOff className="h-3 w-3 mr-1" />离线</>
+              )}
+            </Badge>
+          )}
         </div>
         <CardDescription className="truncate text-xs">{node.url}</CardDescription>
       </CardHeader>
       <CardContent className="pb-2">
         <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground">
-          {node.version && (
-            <span>版本: <span className="text-foreground font-medium">{node.version}</span></span>
+          {version && (
+            <span>版本: <span className="text-foreground font-medium">{version}</span></span>
           )}
-          {node.mode && (
-            <span>模式: <span className="text-foreground font-medium">{node.mode}</span></span>
+          {mode && (
+            <span>模式: <span className="text-foreground font-medium">{mode}</span></span>
           )}
         </div>
       </CardContent>
