@@ -426,6 +426,7 @@ async fn handle_list_all_forwards(State(state): State<MasterState>) -> Response 
     }
 
     let mut items: Vec<Value> = Vec::new();
+    let mut node_summaries: Vec<Value> = Vec::new();
     while let Some(joined) = set.join_next().await {
         let (node, res) = match joined {
             Ok(v) => v,
@@ -434,6 +435,12 @@ async fn handle_list_all_forwards(State(state): State<MasterState>) -> Response 
         match res {
             Ok(value) => {
                 let arr = value.get("forward").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                node_summaries.push(json!({
+                    "id": node.id,
+                    "name": node.name,
+                    "online": true,
+                    "rule_count": arr.len(),
+                }));
                 for (idx, rule) in arr.into_iter().enumerate() {
                     items.push(json!({
                         "node_id": node.id,
@@ -445,12 +452,11 @@ async fn handle_list_all_forwards(State(state): State<MasterState>) -> Response 
                 }
             }
             Err(_) => {
-                items.push(json!({
-                    "node_id": node.id,
-                    "node_name": node.name,
-                    "node_online": false,
-                    "idx": null,
-                    "rule": null,
+                node_summaries.push(json!({
+                    "id": node.id,
+                    "name": node.name,
+                    "online": false,
+                    "rule_count": 0,
                 }));
             }
         }
@@ -465,8 +471,9 @@ async fn handle_list_all_forwards(State(state): State<MasterState>) -> Response 
             ax.cmp(&bx)
         })
     });
+    node_summaries.sort_by_key(|n| n.get("id").and_then(|v| v.as_i64()).unwrap_or(0));
 
-    Json(json!({ "ok": true, "items": items })).into_response()
+    Json(json!({ "ok": true, "nodes": node_summaries, "items": items })).into_response()
 }
 
 // ── 主控公钥 ──────────────────────────────────────────────────────

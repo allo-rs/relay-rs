@@ -180,14 +180,30 @@ export interface AggregatedForward {
   rule: ForwardRule | null;
 }
 
-interface ForwardsAggregateResponse {
-  ok: true;
+export interface ForwardsNodeSummary {
+  id: number;
+  name: string;
+  online: boolean;
+  rule_count: number;
+}
+
+export interface ForwardsAggregate {
+  nodes: ForwardsNodeSummary[];
   items: AggregatedForward[];
 }
 
-// 跨所有节点聚合的转发规则
-export function getAllForwards(): Promise<AggregatedForward[]> {
-  return apiFetch<ForwardsAggregateResponse>("/api/forwards").then((r) => r.items);
+interface ForwardsAggregateResponse {
+  ok: true;
+  nodes: ForwardsNodeSummary[];
+  items: AggregatedForward[];
+}
+
+// 跨所有节点聚合的转发规则（同时返回节点概况供选择器 / 离线提示）
+export function getAllForwards(): Promise<ForwardsAggregate> {
+  return apiFetch<ForwardsAggregateResponse>("/api/forwards").then((r) => ({
+    nodes: r.nodes ?? [],
+    items: r.items ?? [],
+  }));
 }
 
 export function getMasterPubkey(): Promise<{ pubkey: string }> {

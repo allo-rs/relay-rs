@@ -35,17 +35,17 @@ export default function Forwards() {
     refetchInterval: 30_000,
   });
 
-  const items = data ?? [];
+  const items = data?.items ?? [];
+  const nodes = data?.nodes ?? [];
 
-  const nodeOptions = useMemo(() => {
-    const map = new Map<number, string>();
-    items.forEach((it) => map.set(it.node_id, it.node_name));
-    return Array.from(map.entries()).map(([id, name]) => ({ id, name }));
-  }, [items]);
+  const nodeOptions = useMemo(
+    () => nodes.map((n) => ({ id: n.id, name: n.name, online: n.online })),
+    [nodes]
+  );
 
   const offlineNodes = useMemo(
-    () => items.filter((it) => !it.node_online),
-    [items]
+    () => nodes.filter((n) => !n.online),
+    [nodes]
   );
 
   const filtered = useMemo(() => {
@@ -106,7 +106,7 @@ export default function Forwards() {
             size="sm"
             className="gap-1.5"
             onClick={() => setDialogOpen(true)}
-            disabled={nodeOptions.length === 0}
+            disabled={nodeOptions.filter((n) => n.online).length === 0}
           >
             <Plus className="h-4 w-4" />
             新建转发
@@ -155,7 +155,7 @@ export default function Forwards() {
               {offlineNodes.length} 个节点离线，规则无法显示：
             </span>
             <span className="ml-1 text-amber-700 dark:text-amber-300">
-              {offlineNodes.map((n) => n.node_name).join("、")}
+              {offlineNodes.map((n) => n.name).join("、")}
             </span>
           </div>
         </div>
