@@ -33,8 +33,8 @@ fi
 # ── 检测架构 ──────────────────────────────────────────────────────
 ARCH=$(uname -m)
 case "$ARCH" in
-  x86_64)         ARTIFACT="relay-rs-x86_64" ;;
-  aarch64|arm64)  ARTIFACT="relay-rs-aarch64" ;;
+  x86_64)         ARTIFACT="relay-rs-x86_64-unknown-linux-musl" ;;
+  aarch64|arm64)  ARTIFACT="relay-rs-aarch64-unknown-linux-musl" ;;
   *)              error "不支持的架构: $ARCH" ;;
 esac
 
