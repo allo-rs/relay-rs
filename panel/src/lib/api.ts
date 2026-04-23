@@ -172,6 +172,24 @@ export function deleteNode(id: number): Promise<OkResponse> {
   });
 }
 
+export interface AggregatedForward {
+  node_id: number;
+  node_name: string;
+  node_online: boolean;
+  idx: number | null;
+  rule: ForwardRule | null;
+}
+
+interface ForwardsAggregateResponse {
+  ok: true;
+  items: AggregatedForward[];
+}
+
+// 跨所有节点聚合的转发规则
+export function getAllForwards(): Promise<AggregatedForward[]> {
+  return apiFetch<ForwardsAggregateResponse>("/api/forwards").then((r) => r.items);
+}
+
 export function getMasterPubkey(): Promise<{ pubkey: string }> {
   return apiFetch<{ pubkey: string }>("/api/pubkey");
 }

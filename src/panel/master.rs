@@ -142,6 +142,8 @@ pub fn router(panel_cfg: PanelConfig, _config_path: String, db: PgPool) -> Route
         .route("/api/nodes/{id}/rules/block/{idx}", delete(handle_node_del_block))
         .route("/api/nodes/{id}/stats", get(handle_node_stats))
         .route("/api/nodes/{id}/reload", post(handle_node_reload))
+        // 跨节点聚合
+        .route("/api/forwards", get(handle_list_all_forwards))
         .route("/api/pubkey", get(handle_pubkey))
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(state.clone(), jwt_middleware));
@@ -398,6 +400,73 @@ async fn handle_logout() -> Response {
         resp.headers_mut().append(header::SET_COOKIE, v);
     }
     resp
+}
+
+// ── 跨节点聚合 ────────────────────────────────────────────────────
+
+/// GET /api/forwards — 并发拉取所有节点的转发规则并打平
+///
+/// 节点不可达时该节点 online=false 但不影响其他节点结果。
+async fn handle_list_all_forwards(State(state): State<MasterState>) -> Response {
+    let nodes = match crate::db::list_nodes(&state.db).await {
+        Ok(n) => n,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    };
+
+    let pk = state.panel_cfg.private_key.clone().unwrap_or_default();
+    let mut set = tokio::task::JoinSet::new();
+    for node in nodes {
+        let client = state.http_client.clone();
+        let pk = pk.clone();
+        set.spawn(async move {
+            let entry = mk_entry(&node.name, &node.url);
+            let res = proxy_to_node(&client, &entry, reqwest::Method::GET, "/api/rules", None, &pk).await;
+            (node, res)
+        });
+    }
+
+    let mut items: Vec<Value> = Vec::new();
+    while let Some(joined) = set.join_next().await {
+        let (node, res) = match joined {
+            Ok(v) => v,
+            Err(e) => { log::warn!("聚合任务 panic: {}", e); continue; }
+        };
+        match res {
+            Ok(value) => {
+                let arr = value.get("forward").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                for (idx, rule) in arr.into_iter().enumerate() {
+                    items.push(json!({
+                        "node_id": node.id,
+                        "node_name": node.name,
+                        "node_online": true,
+                        "idx": idx,
+                        "rule": rule,
+                    }));
+                }
+            }
+            Err(_) => {
+                items.push(json!({
+                    "node_id": node.id,
+                    "node_name": node.name,
+                    "node_online": false,
+                    "idx": null,
+                    "rule": null,
+                }));
+            }
+        }
+    }
+
+    items.sort_by(|a, b| {
+        let ai = a.get("node_id").and_then(|v| v.as_i64()).unwrap_or(0);
+        let bi = b.get("node_id").and_then(|v| v.as_i64()).unwrap_or(0);
+        ai.cmp(&bi).then_with(|| {
+            let ax = a.get("idx").and_then(|v| v.as_i64()).unwrap_or(-1);
+            let bx = b.get("idx").and_then(|v| v.as_i64()).unwrap_or(-1);
+            ax.cmp(&bx)
+        })
+    });
+
+    Json(json!({ "ok": true, "items": items })).into_response()
 }
 
 // ── 主控公钥 ──────────────────────────────────────────────────────

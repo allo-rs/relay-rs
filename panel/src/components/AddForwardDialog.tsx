@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useForm, useFieldArray } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -16,10 +16,11 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { NativeSelect } from "@/components/ui/select";
-import { addForwardRule } from "@/lib/api";
-import type { ForwardRule } from "@/lib/types";
+import { addForwardRule, getNodes } from "@/lib/api";
+import type { ForwardRule, NodeInfo } from "@/lib/types";
 
 const schema = z.object({
+  node_id: z.coerce.number().int().positive("请选择节点"),
   listen: z.string().min(1, "监听端口不能为空"),
   to: z
     .array(z.object({ value: z.string().min(1, "目标地址不能为空") }))
@@ -36,7 +37,8 @@ type FormValues = z.infer<typeof schema>;
 interface AddForwardDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  nodeId: number;
+  /** 不传时显示节点选择器（用于跨节点的「转发」总览页） */
+  nodeId?: number;
   onSuccess: () => void;
 }
 
@@ -47,6 +49,7 @@ export default function AddForwardDialog({
   onSuccess,
 }: AddForwardDialogProps) {
   const [submitting, setSubmitting] = useState(false);
+  const [nodes, setNodes] = useState<NodeInfo[]>([]);
 
   const {
     register,
@@ -59,6 +62,7 @@ export default function AddForwardDialog({
   } = useForm<FormValues>({
     resolver: zodResolver(schema),
     defaultValues: {
+      node_id: nodeId ?? 0,
       listen: "",
       to: [{ value: "" }],
       proto: "all",
@@ -66,6 +70,24 @@ export default function AddForwardDialog({
       comment: "",
     },
   });
+
+  // 跨节点模式下加载节点列表
+  useEffect(() => {
+    if (!open || nodeId !== undefined) return;
+    getNodes()
+      .then((list) => {
+        setNodes(list);
+        if (list.length > 0) {
+          setValue("node_id", list[0].id);
+        }
+      })
+      .catch(() => {});
+  }, [open, nodeId, setValue]);
+
+  // 外部 nodeId 变化时同步
+  useEffect(() => {
+    if (nodeId !== undefined) setValue("node_id", nodeId);
+  }, [nodeId, setValue]);
 
   const { fields, append, remove } = useFieldArray({ control, name: "to" });
   const toValues = watch("to");
@@ -83,7 +105,7 @@ export default function AddForwardDialog({
         balance: showBalance ? values.balance : undefined,
         rate_limit: values.rate_limit || undefined,
       };
-      await addForwardRule(nodeId, rule);
+      await addForwardRule(values.node_id, rule);
       toast.success("转发规则添加成功");
       reset();
       onOpenChange(false);
@@ -107,6 +129,24 @@ export default function AddForwardDialog({
           <DialogTitle>添加转发规则</DialogTitle>
         </DialogHeader>
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+          {/* 节点选择（仅跨节点模式） */}
+          {nodeId === undefined && (
+            <div className="space-y-1.5">
+              <Label htmlFor="node_id">目标节点 *</Label>
+              <NativeSelect id="node_id" {...register("node_id")}>
+                {nodes.length === 0 && <option value={0}>暂无节点</option>}
+                {nodes.map((n) => (
+                  <option key={n.id} value={n.id}>
+                    {n.name}
+                  </option>
+                ))}
+              </NativeSelect>
+              {errors.node_id && (
+                <p className="text-xs text-destructive">{errors.node_id.message}</p>
+              )}
+            </div>
+          )}
+
           {/* 监听端口 */}
           <div className="space-y-1.5">
             <Label htmlFor="listen">监听端口 *</Label>
