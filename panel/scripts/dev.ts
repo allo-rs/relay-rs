@@ -23,6 +23,7 @@ async function buildJS() {
     target: "browser",
     define: { "process.env.NODE_ENV": '"development"' },
     sourcemap: "inline",
+    alias: { "@": "./src" },
   });
   if (!result.success) console.error("JS build error:", result.logs);
 }

@@ -15,6 +15,7 @@ const result = await Bun.build({
   target: "browser",
   naming: "[name]-[hash].[ext]",
   define: { "process.env.NODE_ENV": '"production"' },
+  alias: { "@": "./src" },
 });
 
 if (!result.success) {
