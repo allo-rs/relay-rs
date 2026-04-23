@@ -1,4 +1,3 @@
-import DynamicIsland from "@/components/DynamicIsland";
 import { cn } from "@/lib/utils";
 
 type Props = {
@@ -9,11 +8,10 @@ type Props = {
   className?: string;
 };
 
-/** 统一的页面骨架：顶部灵动岛 + 留白 + 标题区 + 内容 */
+/** 统一的页面内容骨架：留白 + 标题区 + 内容（DynamicIsland 由 PrivateRoute 统一渲染） */
 export default function PageShell({ title, subtitle, actions, children, className }: Props) {
   return (
     <div className="min-h-screen flex flex-col bg-muted/30">
-      <DynamicIsland />
       {/* 给灵动岛留出空间 */}
       <main className={cn("flex-1 container pt-24 pb-12", className)}>
         {(title || actions) && (

@@ -1,8 +1,10 @@
 import { Navigate, Outlet, useLocation } from "react-router-dom";
 import { Loader2 } from "lucide-react";
 import { useCurrentUser } from "@/lib/CurrentUser";
+import DynamicIsland from "@/components/DynamicIsland";
 
 // 需要登录的路由守卫，未登录则跳转 /login
+// DynamicIsland 放在这里，路由切换时不会被卸载重建
 export default function PrivateRoute() {
   const { user, configured, loading } = useCurrentUser();
   const loc = useLocation();
@@ -15,9 +17,13 @@ export default function PrivateRoute() {
     );
   }
 
-  // 未配置 Discourse：开放模式，直接放行（后端也不校验）
   if (!configured) {
-    return <Outlet />;
+    return (
+      <>
+        <DynamicIsland />
+        <Outlet />
+      </>
+    );
   }
 
   if (!user) {
@@ -25,5 +31,10 @@ export default function PrivateRoute() {
     return <Navigate to={`/login?next=${next}`} replace />;
   }
 
-  return <Outlet />;
+  return (
+    <>
+      <DynamicIsland />
+      <Outlet />
+    </>
+  );
 }
