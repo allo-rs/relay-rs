@@ -40,13 +40,16 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: 安装交叉编译工具链
-        run: sudo apt-get install -y musl-tools gcc-aarch64-linux-gnu
+      - name: 安装 Zig（用于 musl 交叉编译）
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.13.0
+
+      - name: 安装 cargo-zigbuild
+        run: cargo install cargo-zigbuild --locked
 
       - name: 编译
-        run: cargo build --release --target ${{ matrix.target }}
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
+        run: cargo zigbuild --release --target ${{ matrix.target }}
 
       - name: 重命名产物
         run: cp target/${{ matrix.target }}/release/relay-rs ${{ matrix.artifact }}

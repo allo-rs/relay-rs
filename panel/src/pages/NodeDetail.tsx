@@ -1,15 +1,16 @@
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { RefreshCcw, ChevronRight, Home, Loader2 } from "lucide-react";
+import { useState } from "react";
+import { RefreshCcw, ChevronRight, Server, Loader2, Copy, Check } from "lucide-react";
 import { toast } from "sonner";
-import NavBar from "@/components/NavBar";
+import PageShell from "@/components/PageShell";
 import ForwardRuleTable from "@/components/ForwardRuleTable";
 import BlockRuleTable from "@/components/BlockRuleTable";
 import StatsView from "@/components/StatsView";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { getNodes, getNodeRules, reloadNode } from "@/lib/api";
+import { getNodes, getNodeRules, reloadNode, getMasterPubkey } from "@/lib/api";
 
 export default function NodeDetail() {
   const { id } = useParams<{ id: string }>();
@@ -31,7 +32,35 @@ export default function NodeDetail() {
   });
   const node = nodes?.find((n) => n.id === nodeId);
 
-  // 获取节点规则
+  const nodeOnline = node?.online === true;
+  const [copied, setCopied] = useState(false);
+
+  // 拉取主控公钥（仅节点离线且节点信息已加载时）
+  const { data: pubkeyData } = useQuery({
+    queryKey: ["master-pubkey"],
+    queryFn: getMasterPubkey,
+    enabled: !nodeOnline && nodes !== undefined,
+    staleTime: Infinity,
+  });
+
+  function buildInstallCmd(): string {
+    if (!node || !pubkeyData?.pubkey) return "";
+    const url = new URL(node.url);
+    const port = url.port || "9090";
+    const b64 = btoa(pubkeyData.pubkey);
+    return `curl -fsSL https://raw.githubusercontent.com/allo-rs/relay-rs/main/scripts/install-node.sh \\\n  | bash -s -- --port ${port} --pubkey-b64 ${b64}`;
+  }
+
+  function handleCopy() {
+    const cmd = buildInstallCmd();
+    if (!cmd) return;
+    navigator.clipboard.writeText(cmd).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }
+
+  // 获取节点规则（仅节点在线时请求）
   const {
     data: rules,
     isLoading: rulesLoading,
@@ -40,6 +69,7 @@ export default function NodeDetail() {
   } = useQuery({
     queryKey: ["rules", nodeId],
     queryFn: () => getNodeRules(nodeId),
+    enabled: nodeOnline,
   });
 
   // 重载规则 mutation
@@ -60,118 +90,141 @@ export default function NodeDetail() {
   }
 
   return (
-    <div className="min-h-screen flex flex-col">
-      <NavBar />
+    <PageShell>
+      {/* 面包屑 */}
+      <nav className="flex items-center gap-1.5 text-sm text-muted-foreground mb-4">
+        <Link
+          to="/nodes"
+          className="flex items-center gap-1 hover:text-foreground transition-colors"
+        >
+          <Server className="h-3.5 w-3.5" />
+          节点
+        </Link>
+        <ChevronRight className="h-3.5 w-3.5" />
+        <span className="text-foreground font-medium">
+          {node?.name ?? `节点 #${nodeId}`}
+        </span>
+      </nav>
 
-      <main className="flex-1 container py-6">
-        {/* 面包屑 */}
-        <nav className="flex items-center gap-1.5 text-sm text-muted-foreground mb-4">
-          <Link
-            to="/"
-            className="flex items-center gap-1 hover:text-foreground transition-colors"
-          >
-            <Home className="h-3.5 w-3.5" />
-            面板
-          </Link>
-          <ChevronRight className="h-3.5 w-3.5" />
-          <span className="text-foreground font-medium">
+      {/* 页面标题 + 操作 */}
+      <div className="flex items-start justify-between mb-6 gap-4">
+        <div>
+          <h2 className="text-2xl font-semibold tracking-tight">
             {node?.name ?? `节点 #${nodeId}`}
-          </span>
-        </nav>
+          </h2>
+          {node && (
+            <p className="text-sm text-muted-foreground mt-1 font-mono">
+              {node.url}
+            </p>
+          )}
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          className="gap-1.5 shrink-0"
+          onClick={() => reloadMutation.mutate()}
+          disabled={reloadMutation.isPending || !nodeOnline}
+        >
+          {reloadMutation.isPending ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <RefreshCcw className="h-4 w-4" />
+          )}
+          重载规则
+        </Button>
+      </div>
 
-        {/* 页面标题 + 操作 */}
-        <div className="flex items-start justify-between mb-6 gap-4">
-          <div>
-            <h2 className="text-2xl font-semibold tracking-tight">
-              {node?.name ?? `节点 #${nodeId}`}
-            </h2>
-            {node && (
-              <p className="text-sm text-muted-foreground mt-1 font-mono">
-                {node.url}
-              </p>
-            )}
-          </div>
-          <Button
-            variant="outline"
-            size="sm"
-            className="gap-1.5 shrink-0"
-            onClick={() => reloadMutation.mutate()}
-            disabled={reloadMutation.isPending}
-          >
-            {reloadMutation.isPending ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <RefreshCcw className="h-4 w-4" />
-            )}
-            重载规则
+      {/* 节点离线：展示一键安装命令 */}
+      {!nodeOnline && nodes !== undefined && (
+        <div className="flex flex-col items-center py-12 gap-4 text-center">
+          <p className="text-sm text-muted-foreground">
+            节点离线，在节点服务器上以 <strong>root</strong> 执行以下命令完成安装：
+          </p>
+          {pubkeyData?.pubkey ? (
+            <div className="w-full max-w-2xl text-left space-y-2">
+              <pre className="bg-muted rounded-md p-4 text-xs font-mono leading-relaxed overflow-x-auto whitespace-pre-wrap break-all select-all">
+                {buildInstallCmd()}
+              </pre>
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-1.5"
+                onClick={handleCopy}
+              >
+                {copied ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
+                {copied ? "已复制" : "复制命令"}
+              </Button>
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground">加载安装命令中...</p>
+          )}
+        </div>
+      )}
+
+      {/* 加载中 */}
+      {nodeOnline && rulesLoading && (
+        <div className="space-y-3">
+          <Skeleton className="h-10 w-64" />
+          <Skeleton className="h-48 w-full" />
+        </div>
+      )}
+
+      {/* 错误 */}
+      {nodeOnline && rulesError && !rulesLoading && (
+        <div className="flex flex-col items-center py-16 gap-3 text-center">
+          <p className="text-sm text-destructive">
+            加载规则失败：{rulesError instanceof Error ? rulesError.message : "未知错误"}
+          </p>
+          <Button variant="outline" size="sm" onClick={() => refetchRules()}>
+            重试
           </Button>
         </div>
+      )}
 
-        {/* 加载中 */}
-        {rulesLoading && (
-          <div className="space-y-3">
-            <Skeleton className="h-10 w-64" />
-            <Skeleton className="h-48 w-full" />
-          </div>
-        )}
+      {/* 规则 Tabs */}
+      {nodeOnline && rules && !rulesLoading && (
+        <Tabs defaultValue="forward">
+          <TabsList className="mb-4">
+            <TabsTrigger value="forward">
+              转发规则
+              {rules.forward.length > 0 && (
+                <span className="ml-1.5 rounded-full bg-primary/15 px-1.5 py-0.5 text-xs font-semibold text-primary">
+                  {rules.forward.length}
+                </span>
+              )}
+            </TabsTrigger>
+            <TabsTrigger value="block">
+              防火墙规则
+              {rules.block.length > 0 && (
+                <span className="ml-1.5 rounded-full bg-destructive/15 px-1.5 py-0.5 text-xs font-semibold text-destructive">
+                  {rules.block.length}
+                </span>
+              )}
+            </TabsTrigger>
+            <TabsTrigger value="stats">流量统计</TabsTrigger>
+          </TabsList>
 
-        {/* 错误 */}
-        {rulesError && !rulesLoading && (
-          <div className="flex flex-col items-center py-16 gap-3 text-center">
-            <p className="text-sm text-destructive">
-              加载规则失败：{rulesError instanceof Error ? rulesError.message : "未知错误"}
-            </p>
-            <Button variant="outline" size="sm" onClick={() => refetchRules()}>
-              重试
-            </Button>
-          </div>
-        )}
+          <TabsContent value="forward">
+            <ForwardRuleTable
+              nodeId={nodeId}
+              rules={rules.forward}
+              onRefresh={handleRulesRefresh}
+            />
+          </TabsContent>
 
-        {/* 规则 Tabs */}
-        {rules && !rulesLoading && (
-          <Tabs defaultValue="forward">
-            <TabsList className="mb-4">
-              <TabsTrigger value="forward">
-                转发规则
-                {rules.forward.length > 0 && (
-                  <span className="ml-1.5 rounded-full bg-primary/15 px-1.5 py-0.5 text-xs font-semibold text-primary">
-                    {rules.forward.length}
-                  </span>
-                )}
-              </TabsTrigger>
-              <TabsTrigger value="block">
-                防火墙规则
-                {rules.block.length > 0 && (
-                  <span className="ml-1.5 rounded-full bg-destructive/15 px-1.5 py-0.5 text-xs font-semibold text-destructive">
-                    {rules.block.length}
-                  </span>
-                )}
-              </TabsTrigger>
-              <TabsTrigger value="stats">流量统计</TabsTrigger>
-            </TabsList>
+          <TabsContent value="block">
+            <BlockRuleTable
+              nodeId={nodeId}
+              rules={rules.block}
+              onRefresh={handleRulesRefresh}
+            />
+          </TabsContent>
 
-            <TabsContent value="forward">
-              <ForwardRuleTable
-                nodeId={nodeId}
-                rules={rules.forward}
-                onRefresh={handleRulesRefresh}
-              />
-            </TabsContent>
-
-            <TabsContent value="block">
-              <BlockRuleTable
-                nodeId={nodeId}
-                rules={rules.block}
-                onRefresh={handleRulesRefresh}
-              />
-            </TabsContent>
-
-            <TabsContent value="stats">
-              <StatsView nodeId={nodeId} />
-            </TabsContent>
-          </Tabs>
-        )}
-      </main>
-    </div>
+          <TabsContent value="stats">
+            <StatsView nodeId={nodeId} />
+          </TabsContent>
+        </Tabs>
+      )}
+    </PageShell>
   );
 }

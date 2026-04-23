@@ -20,13 +20,18 @@ build-panel:
 build: build-panel
 	cargo build --release
 
-# 首次初始化开发配置
+# 首次初始化开发配置（文件已存在则跳过，防止重复覆盖）
 $(DEV_CFG): $(BINARY)
-	@echo "初始化开发配置 $(DEV_CFG)..."
-	@printf 'mode = "relay"\n\n[panel]\nmode = "master"\nlisten = "127.0.0.1:9090"\nsecret = "dev-jwt-secret-change-me"\ndatabase_url = "postgresql://user:pass@host:5432/relay?sslmode=disable"\n' > $(DEV_CFG)
-	@echo ""
-	@echo "设置面板管理员密码（用于登录 Web 面板）:"
-	@$(BINARY) --config $(DEV_CFG) panel-passwd
+	@if [ -f $(DEV_CFG) ]; then \
+	  touch $(DEV_CFG); \
+	else \
+	  echo "初始化开发配置 $(DEV_CFG)..."; \
+	  printf 'mode = "relay"\n\n[panel]\nmode = "master"\nlisten = "127.0.0.1:9090"\nsecret = "dev-jwt-secret-change-me"\n# TODO: 填写真实数据库地址\ndatabase_url = "postgresql://USER:PASS@HOST:5432/relay?sslmode=disable"\n' > $(DEV_CFG); \
+	  echo "⚠️  请编辑 $(DEV_CFG) 填写真实的 database_url，然后重新运行 make dev-setup"; \
+	  echo ""; \
+	  echo "设置面板管理员密码（用于登录 Web 面板）:"; \
+	  $(BINARY) --config $(DEV_CFG) panel-passwd; \
+	fi
 
 dev-setup: $(BINARY) $(DEV_CFG)
 

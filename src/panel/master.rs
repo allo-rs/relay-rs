@@ -40,6 +40,7 @@ async fn jwt_middleware(State(state): State<MasterState>, req: Request, next: Ne
 pub fn router(panel_cfg: PanelConfig, _config_path: String, db: PgPool) -> Router {
     let http_client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
+        .timeout(std::time::Duration::from_secs(5))
         .build()
         .unwrap();
 
@@ -58,6 +59,7 @@ pub fn router(panel_cfg: PanelConfig, _config_path: String, db: PgPool) -> Route
         .route("/api/nodes/{id}/rules/block/{idx}", delete(handle_node_del_block))
         .route("/api/nodes/{id}/stats", get(handle_node_stats))
         .route("/api/nodes/{id}/reload", post(handle_node_reload))
+        .route("/api/pubkey", get(handle_pubkey))
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(state.clone(), jwt_middleware));
 
@@ -69,6 +71,13 @@ pub fn router(panel_cfg: PanelConfig, _config_path: String, db: PgPool) -> Route
 
 async fn handle_asset(req: Request) -> Response {
     super::assets::serve_asset(req.uri().clone()).await.into_response()
+}
+
+// ── 主控公钥 ──────────────────────────────────────────────────────
+
+async fn handle_pubkey(State(state): State<MasterState>) -> Response {
+    let pubkey = derive_pubkey_pem(state.panel_cfg.private_key.as_deref().unwrap_or(""));
+    Json(json!({ "pubkey": pubkey })).into_response()
 }
 
 // ── 登录 ──────────────────────────────────────────────────────────
@@ -303,12 +312,15 @@ async fn proxy_to_node(
     })?;
 
     let status = resp.status();
-    let json: Value = resp.json().await.unwrap_or(json!({}));
-
-    if status.is_success() { Ok(json) } else {
+    if !status.is_success() {
         log::warn!("node {} 返回错误状态: {}", node.name, status);
-        Err(StatusCode::BAD_GATEWAY)
+        return Err(StatusCode::BAD_GATEWAY);
     }
+    let json: Value = resp.json().await.map_err(|e| {
+        log::warn!("node {} 返回非 JSON 响应: {}", node.name, e);
+        StatusCode::BAD_GATEWAY
+    })?;
+    Ok(json)
 }
 
 fn derive_pubkey_pem(private_key_pem: &str) -> String {

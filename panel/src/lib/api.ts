@@ -179,3 +179,7 @@ export function deleteNode(id: number): Promise<OkResponse> {
     method: "DELETE",
   });
 }
+
+export function getMasterPubkey(): Promise<{ pubkey: string }> {
+  return apiFetch<{ pubkey: string }>("/api/pubkey");
+}
