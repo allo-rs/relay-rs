@@ -49,7 +49,6 @@ export default function AddNodeDialog({ open, onOpenChange, onSuccess }: AddNode
     try {
       const res = await addNode({ name: values.name, url });
       setInstallCmd(buildInstallCmd(values.port, res.pubkey ?? ""));
-      onSuccess();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "添加失败");
     } finally {
@@ -61,6 +60,7 @@ export default function AddNodeDialog({ open, onOpenChange, onSuccess }: AddNode
     reset();
     setInstallCmd(null);
     onOpenChange(false);
+    onSuccess();
   }
 
   function handleCopy() {

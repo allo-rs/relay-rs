@@ -1,7 +1,10 @@
 import { Routes, Route, Navigate } from "react-router-dom";
 import Login from "@/pages/Login";
-import Dashboard from "@/pages/Dashboard";
+import Overview from "@/pages/Overview";
+import Forwards from "@/pages/Forwards";
+import Nodes from "@/pages/Nodes";
 import NodeDetail from "@/pages/NodeDetail";
+import Settings from "@/pages/Settings";
 import PrivateRoute from "@/routes/PrivateRoute";
 
 export default function App() {
@@ -12,8 +15,11 @@ export default function App() {
 
       {/* 受保护路由 */}
       <Route element={<PrivateRoute />}>
-        <Route path="/" element={<Dashboard />} />
-        <Route path="/nodes/:id" element={<NodeDetail />} />
+        <Route path="/"             element={<Overview />} />
+        <Route path="/forwards"     element={<Forwards />} />
+        <Route path="/nodes"        element={<Nodes />} />
+        <Route path="/nodes/:id"    element={<NodeDetail />} />
+        <Route path="/settings"     element={<Settings />} />
       </Route>
 
       {/* 兜底重定向 */}
