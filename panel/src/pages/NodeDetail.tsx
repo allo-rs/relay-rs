@@ -1,7 +1,7 @@
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { RefreshCcw, ChevronRight, Server, Loader2, Copy, Check } from "lucide-react";
+import { RefreshCcw, ChevronRight, Server, Loader2, Copy, Check, Terminal } from "lucide-react";
 import { toast } from "sonner";
 import PageShell from "@/components/PageShell";
 import ForwardRuleTable from "@/components/ForwardRuleTable";
@@ -10,6 +10,7 @@ import StatsView from "@/components/StatsView";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { getNodes, getNodeStatus, getNodeRules, reloadNode, getMasterPubkey } from "@/lib/api";
 
 export default function NodeDetail() {
@@ -41,12 +42,13 @@ export default function NodeDetail() {
   });
   const nodeOnline = statusData?.online === true;
   const [copied, setCopied] = useState(false);
+  const [installOpen, setInstallOpen] = useState(false);
 
-  // 拉取主控公钥（仅节点离线且节点信息已加载时）
+  // 始终拉取主控公钥，在线/离线都能查看安装命令
   const { data: pubkeyData } = useQuery({
     queryKey: ["master-pubkey"],
     queryFn: getMasterPubkey,
-    enabled: !nodeOnline && nodes !== undefined,
+    enabled: nodes !== undefined,
     staleTime: Infinity,
   });
 
@@ -55,7 +57,7 @@ export default function NodeDetail() {
     const url = new URL(node.url);
     const port = url.port || "9090";
     const b64 = btoa(pubkeyData.pubkey);
-    return `curl -fsSL https://raw.githubusercontent.com/allo-rs/relay-rs/main/scripts/install-node.sh \\\n  | bash -s -- --port ${port} --pubkey-b64 ${b64}`;
+    return `bash <(curl -fsSL https://raw.githubusercontent.com/allo-rs/relay-rs/main/scripts/install-node.sh) \\\n  --port ${port} --pubkey-b64 ${b64}`;
   }
 
   function handleCopy() {
@@ -125,46 +127,65 @@ export default function NodeDetail() {
             </p>
           )}
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          className="gap-1.5 shrink-0"
-          onClick={() => reloadMutation.mutate()}
-          disabled={reloadMutation.isPending || !nodeOnline}
-        >
-          {reloadMutation.isPending ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <RefreshCcw className="h-4 w-4" />
-          )}
-          重载规则
-        </Button>
+        <div className="flex gap-2 shrink-0">
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1.5"
+            onClick={() => setInstallOpen(true)}
+          >
+            <Terminal className="h-4 w-4" />
+            安装命令
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1.5"
+            onClick={() => reloadMutation.mutate()}
+            disabled={reloadMutation.isPending || !nodeOnline}
+          >
+            {reloadMutation.isPending ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <RefreshCcw className="h-4 w-4" />
+            )}
+            重载规则
+          </Button>
+        </div>
       </div>
 
-      {/* 节点离线：展示一键安装命令 */}
+      {/* 安装命令 Dialog */}
+      <Dialog open={installOpen} onOpenChange={setInstallOpen}>
+        <DialogContent className="sm:max-w-[600px]">
+          <DialogHeader>
+            <DialogTitle>节点安装命令</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 pt-2">
+            <p className="text-sm text-muted-foreground">
+              在节点服务器上以 <strong>root</strong> 执行以下命令，自动下载并安装 relay-rs：
+            </p>
+            {pubkeyData?.pubkey ? (
+              <>
+                <pre className="bg-muted rounded-md p-4 text-xs font-mono leading-relaxed overflow-x-auto whitespace-pre-wrap break-all select-all">
+                  {buildInstallCmd()}
+                </pre>
+                <Button variant="outline" size="sm" className="gap-1.5" onClick={handleCopy}>
+                  {copied ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
+                  {copied ? "已复制" : "复制命令"}
+                </Button>
+              </>
+            ) : (
+              <p className="text-xs text-muted-foreground">加载中...</p>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* 节点离线提示 */}
       {!nodeOnline && nodes !== undefined && (
-        <div className="flex flex-col items-center py-12 gap-4 text-center">
-          <p className="text-sm text-muted-foreground">
-            节点离线，在节点服务器上以 <strong>root</strong> 执行以下命令完成安装：
-          </p>
-          {pubkeyData?.pubkey ? (
-            <div className="w-full max-w-2xl text-left space-y-2">
-              <pre className="bg-muted rounded-md p-4 text-xs font-mono leading-relaxed overflow-x-auto whitespace-pre-wrap break-all select-all">
-                {buildInstallCmd()}
-              </pre>
-              <Button
-                variant="outline"
-                size="sm"
-                className="gap-1.5"
-                onClick={handleCopy}
-              >
-                {copied ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
-                {copied ? "已复制" : "复制命令"}
-              </Button>
-            </div>
-          ) : (
-            <p className="text-xs text-muted-foreground">加载安装命令中...</p>
-          )}
+        <div className="flex flex-col items-center py-12 gap-2 text-center text-muted-foreground">
+          <p className="text-sm">节点当前离线</p>
+          <p className="text-xs">点击右上角「安装命令」在节点服务器上重新安装</p>
         </div>
       )}
 

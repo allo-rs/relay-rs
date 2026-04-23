@@ -25,7 +25,7 @@ type FormValues = z.infer<typeof schema>;
 
 function buildInstallCmd(port: number, pubkey: string): string {
   const pubkeyB64 = pubkey ? btoa(pubkey) : "";
-  return `curl -fsSL https://raw.githubusercontent.com/allo-rs/relay-rs/main/scripts/install-node.sh \\\n  | bash -s -- --port ${port} --pubkey-b64 ${pubkeyB64}`;
+  return `bash <(curl -fsSL https://raw.githubusercontent.com/allo-rs/relay-rs/main/scripts/install-node.sh) \\\n  --port ${port} --pubkey-b64 ${pubkeyB64}`;
 }
 
 interface AddNodeDialogProps {
