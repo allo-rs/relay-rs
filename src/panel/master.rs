@@ -132,16 +132,16 @@ pub fn router(panel_cfg: PanelConfig, _config_path: String, db: PgPool) -> Route
         )
         // 节点
         .route("/api/nodes", get(handle_list_nodes).post(handle_add_node))
-        .route("/api/nodes/{id}", delete(handle_del_node))
-        .route("/api/nodes/{id}/status", get(handle_node_status))
-        .route("/api/nodes/{id}/rules", get(handle_node_get_rules))
-        .route("/api/nodes/{id}/rules", put(handle_node_put_rules))
-        .route("/api/nodes/{id}/rules/forward", post(handle_node_add_forward))
-        .route("/api/nodes/{id}/rules/forward/{idx}", delete(handle_node_del_forward))
-        .route("/api/nodes/{id}/rules/block", post(handle_node_add_block))
-        .route("/api/nodes/{id}/rules/block/{idx}", delete(handle_node_del_block))
-        .route("/api/nodes/{id}/stats", get(handle_node_stats))
-        .route("/api/nodes/{id}/reload", post(handle_node_reload))
+        .route("/api/nodes/:id", delete(handle_del_node))
+        .route("/api/nodes/:id/status", get(handle_node_status))
+        .route("/api/nodes/:id/rules", get(handle_node_get_rules))
+        .route("/api/nodes/:id/rules", put(handle_node_put_rules))
+        .route("/api/nodes/:id/rules/forward", post(handle_node_add_forward))
+        .route("/api/nodes/:id/rules/forward/:idx", delete(handle_node_del_forward))
+        .route("/api/nodes/:id/rules/block", post(handle_node_add_block))
+        .route("/api/nodes/:id/rules/block/:idx", delete(handle_node_del_block))
+        .route("/api/nodes/:id/stats", get(handle_node_stats))
+        .route("/api/nodes/:id/reload", post(handle_node_reload))
         // 跨节点聚合
         .route("/api/forwards", get(handle_list_all_forwards))
         .route("/api/pubkey", get(handle_pubkey))
@@ -478,7 +478,7 @@ async fn handle_pubkey(State(state): State<MasterState>) -> Response {
 
 // ── 节点 CRUD ─────────────────────────────────────────────────────
 
-/// GET /api/nodes — 仅从 DB 读节点列表（不探活，状态由前端按需调用 /api/nodes/{id}/status）
+/// GET /api/nodes — 仅从 DB 读节点列表（不探活，状态由前端按需调用 /api/nodes/:id/status）
 async fn handle_list_nodes(State(state): State<MasterState>) -> Response {
     let nodes = match crate::db::list_nodes(&state.db).await {
         Ok(n) => n,
@@ -551,7 +551,7 @@ async fn handle_node_del_forward(
     Path((id, idx)): Path<(i32, usize)>,
 ) -> Response {
     with_node(&state, id, |c, n, pk| async move {
-        forward_method(c, n, reqwest::Method::DELETE, &format!("/api/rules/forward/{idx}"), None, pk).await
+        forward_method(c, n, reqwest::Method::DELETE, &format!("/api/rules/forward/:idx"), None, pk).await
     }).await
 }
 
@@ -570,7 +570,7 @@ async fn handle_node_del_block(
     Path((id, idx)): Path<(i32, usize)>,
 ) -> Response {
     with_node(&state, id, |c, n, pk| async move {
-        forward_method(c, n, reqwest::Method::DELETE, &format!("/api/rules/block/{idx}"), None, pk).await
+        forward_method(c, n, reqwest::Method::DELETE, &format!("/api/rules/block/:idx"), None, pk).await
     }).await
 }
 
