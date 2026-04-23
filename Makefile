@@ -26,11 +26,11 @@ $(DEV_CFG): $(BINARY)
 	  touch $(DEV_CFG); \
 	else \
 	  echo "初始化开发配置 $(DEV_CFG)..."; \
-	  printf 'mode = "relay"\n\n[panel]\nmode = "master"\nlisten = "127.0.0.1:9090"\nsecret = "dev-jwt-secret-change-me"\n# TODO: 填写真实数据库地址\ndatabase_url = "postgresql://USER:PASS@HOST:5432/relay?sslmode=disable"\n' > $(DEV_CFG); \
-	  echo "⚠️  请编辑 $(DEV_CFG) 填写真实的 database_url，然后重新运行 make dev-setup"; \
+	  printf 'mode = "relay"\n\n[panel]\nmode = "master"\nlisten = "127.0.0.1:9090"\nsecret = "dev-jwt-secret-change-me"\n# TODO: 填写真实数据库地址\ndatabase_url = "postgresql://USER:PASS@HOST:5432/relay?sslmode=disable"\n\n[panel.discourse]\n# TODO: 指向你的自部署 Discourse 站点\nurl = "https://forum.example.com"\nsecret = "dev-discourse-sso-secret-change-me"\n' > $(DEV_CFG); \
+	  echo "⚠️  请编辑 $(DEV_CFG) 填写真实的 database_url 与 Discourse url/secret，然后重新运行 make dev-setup"; \
 	  echo ""; \
-	  echo "设置面板管理员密码（用于登录 Web 面板）:"; \
-	  $(BINARY) --config $(DEV_CFG) panel-passwd; \
+	  echo "初始化面板 Ed25519 密钥:"; \
+	  $(BINARY) --config $(DEV_CFG) panel-init; \
 	fi
 
 dev-setup: $(BINARY) $(DEV_CFG)

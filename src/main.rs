@@ -76,8 +76,8 @@ enum Command {
     Mode,
     /// 查看各规则流量统计
     Stats,
-    /// 设置面板管理员密码（master 模式）
-    PanelPasswd,
+    /// 初始化面板：生成 Ed25519 主控密钥（master 模式首次运行）
+    PanelInit,
     /// 以守护进程模式运行（供 systemd 调用）
     #[command(hide = true)]
     Daemon,
@@ -195,15 +195,13 @@ fn run_ctl(cmd: Command, config: &str, interval: u64) {
                 Err(e) => { eprintln!("错误: {}", e); std::process::exit(1); }
             }
         }
-        Command::PanelPasswd => panel_passwd(config),
+        Command::PanelInit => panel_init(config),
     }
 }
 
-/// 交互式设置面板管理员用户名和密码，并自动生成 Ed25519 密钥对（如未生成）
-fn panel_passwd(config_path: &str) {
+/// 初始化面板：生成 Ed25519 主控密钥对并保存到配置（登录走 Discourse Connect）
+fn panel_init(config_path: &str) {
     use base64::Engine as _;
-    use dialoguer::{Input, Password, theme::ColorfulTheme};
-    let theme = ColorfulTheme::default();
 
     let mut cfg = config::load(config_path).unwrap_or_default();
 
@@ -215,14 +213,15 @@ fn panel_passwd(config_path: &str) {
         master_pubkey: None,
         tls_cert: None,
         tls_key: None,
-        auth: None,
+        discourse: None,
         nodes: Vec::new(),
         database_url: None,
     });
 
-    // 自动生成 Ed25519 密钥对（仅首次运行）
-    if panel.private_key.is_none() {
-        println!("首次运行，正在生成 Ed25519 密钥对...");
+    if panel.private_key.is_some() {
+        println!("已存在 Ed25519 主控密钥，跳过生成。");
+    } else {
+        println!("生成 Ed25519 主控密钥对...");
         let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519)
             .unwrap_or_else(|e| { eprintln!("生成密钥对失败: {}", e); std::process::exit(1); });
         let priv_pem = key_pair.serialize_pem();
@@ -239,25 +238,15 @@ fn panel_passwd(config_path: &str) {
         println!("\n节点配置中的 master_pubkey：\n{}", pub_pem);
     }
 
-    let username: String = Input::with_theme(&theme)
-        .with_prompt("管理员用户名")
-        .with_initial_text(panel.auth.as_ref().map(|a| a.username.as_str()).unwrap_or("admin"))
-        .interact_text()
-        .unwrap_or_else(|_| std::process::exit(1));
-
-    let password = Password::with_theme(&theme)
-        .with_prompt("管理员密码")
-        .with_confirmation("确认密码", "两次输入不一致，请重试")
-        .interact()
-        .unwrap_or_else(|_| std::process::exit(1));
-
-    let hash = bcrypt::hash(&password, bcrypt::DEFAULT_COST)
-        .unwrap_or_else(|e| { eprintln!("密码加密失败: {}", e); std::process::exit(1); });
-
-    panel.auth = Some(config::PanelAuth { username, password: hash });
+    if panel.secret.is_empty() {
+        eprintln!("⚠️  panel.secret 为空，请手动填写一个随机字符串用于签发面板登录 JWT。");
+    }
+    if panel.discourse.is_none() {
+        eprintln!("⚠️  未配置 [panel.discourse]，面板将无法登录。请参考配置示例添加 url/secret。");
+    }
 
     match config::save(&cfg, config_path) {
-        Ok(_) => println!("面板密码已更新。"),
+        Ok(_) => println!("面板配置已保存：{}", config_path),
         Err(e) => { eprintln!("保存失败: {}", e); std::process::exit(1); }
     }
 }

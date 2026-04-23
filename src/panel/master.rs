@@ -1,9 +1,9 @@
 use axum::{
     Json, Router,
-    extract::{Path, Request, State},
-    http::StatusCode,
+    extract::{Path, Query, Request, State},
+    http::{header, HeaderValue, StatusCode},
     middleware::{self, Next},
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Redirect, Response},
     routing::{delete, get, post, put},
 };
 use base64::Engine as _;
@@ -11,43 +11,67 @@ use rcgen;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::PgPool;
+use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 
 use crate::config::PanelConfig;
+use crate::panel::auth::AUTH_COOKIE;
+use crate::panel::discourse::{self as discourse, NonceStore};
 
 #[derive(Clone)]
 struct MasterState {
     panel_cfg: PanelConfig,
     http_client: reqwest::Client,
     db: PgPool,
+    nonces: Arc<NonceStore>,
 }
 
-/// JWT 认证中间件，跳过 /api/auth/login
+fn is_public_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/api/auth/discourse/login" | "/api/auth/discourse/callback"
+    )
+}
+
+/// JWT 认证中间件：从 HttpOnly cookie 读取
 async fn jwt_middleware(State(state): State<MasterState>, req: Request, next: Next) -> Response {
-    if req.uri().path() == "/api/auth/login" {
+    if is_public_path(req.uri().path()) {
         return next.run(req).await;
     }
-    let token = super::auth::extract_bearer(req.headers());
+    let token = super::auth::extract_cookie(req.headers(), AUTH_COOKIE);
     match token {
-        Some(t) => match super::auth::verify_token(&t, &state.panel_cfg.secret) {
+        Some(t) => match super::auth::verify_user_token(&t, &state.panel_cfg.secret) {
             Ok(_) => next.run(req).await,
-            Err(_) => (StatusCode::UNAUTHORIZED, Json(json!({ "error": "JWT 验证失败" }))).into_response(),
+            Err(_) => unauthorized("登录已过期，请重新登录"),
         },
-        None => (StatusCode::UNAUTHORIZED, Json(json!({ "error": "缺少 Authorization 头" }))).into_response(),
+        None => unauthorized("未登录"),
     }
+}
+
+fn unauthorized(msg: &str) -> Response {
+    (StatusCode::UNAUTHORIZED, Json(json!({ "error": msg }))).into_response()
 }
 
 pub fn router(panel_cfg: PanelConfig, _config_path: String, db: PgPool) -> Router {
     let http_client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
-        .timeout(std::time::Duration::from_secs(5))
         .build()
         .unwrap();
 
-    let state = MasterState { panel_cfg, http_client, db };
+    let state = MasterState {
+        panel_cfg,
+        http_client,
+        db,
+        nonces: Arc::new(NonceStore::new()),
+    };
 
     let api = Router::new()
-        .route("/api/auth/login", post(handle_login))
+        // 认证
+        .route("/api/auth/discourse/login", get(handle_discourse_login))
+        .route("/api/auth/discourse/callback", get(handle_discourse_callback))
+        .route("/api/auth/me", get(handle_me))
+        .route("/api/auth/logout", post(handle_logout))
+        // 节点
         .route("/api/nodes", get(handle_list_nodes).post(handle_add_node))
         .route("/api/nodes/{id}", delete(handle_del_node))
         .route("/api/nodes/{id}/status", get(handle_node_status))
@@ -59,7 +83,6 @@ pub fn router(panel_cfg: PanelConfig, _config_path: String, db: PgPool) -> Route
         .route("/api/nodes/{id}/rules/block/{idx}", delete(handle_node_del_block))
         .route("/api/nodes/{id}/stats", get(handle_node_stats))
         .route("/api/nodes/{id}/reload", post(handle_node_reload))
-        .route("/api/pubkey", get(handle_pubkey))
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(state.clone(), jwt_middleware));
 
@@ -73,39 +96,154 @@ async fn handle_asset(req: Request) -> Response {
     super::assets::serve_asset(req.uri().clone()).await.into_response()
 }
 
-// ── 主控公钥 ──────────────────────────────────────────────────────
+// ── Discourse Connect 登录 ────────────────────────────────────────
 
-async fn handle_pubkey(State(state): State<MasterState>) -> Response {
-    let pubkey = derive_pubkey_pem(state.panel_cfg.private_key.as_deref().unwrap_or(""));
-    Json(json!({ "pubkey": pubkey })).into_response()
+#[derive(Deserialize)]
+struct LoginQuery {
+    next: Option<String>,
 }
 
-// ── 登录 ──────────────────────────────────────────────────────────
+async fn handle_discourse_login(
+    State(state): State<MasterState>,
+    Query(q): Query<LoginQuery>,
+    req: Request,
+) -> Response {
+    let disc = match &state.panel_cfg.discourse {
+        Some(d) if !d.url.is_empty() && !d.secret.is_empty() => d.clone(),
+        _ => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "未配置 Discourse" })),
+            )
+                .into_response();
+        }
+    };
 
-async fn handle_login(State(state): State<MasterState>, Json(body): Json<Value>) -> Response {
-    let auth = match &state.panel_cfg.auth {
-        Some(a) => a.clone(),
-        None => return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "未配置面板认证" }))).into_response(),
+    let next = q.next.unwrap_or_else(|| "/".to_string());
+    let nonce = state.nonces.issue(next);
+    let callback = build_callback_url(&req, &state.panel_cfg);
+    let redirect = discourse::build_login_redirect(&disc.url, &disc.secret, &callback, &nonce);
+
+    Redirect::temporary(&redirect).into_response()
+}
+
+#[derive(Deserialize)]
+struct CallbackQuery {
+    sso: String,
+    sig: String,
+}
+
+async fn handle_discourse_callback(
+    State(state): State<MasterState>,
+    Query(q): Query<CallbackQuery>,
+) -> Response {
+    let disc = match &state.panel_cfg.discourse {
+        Some(d) if !d.url.is_empty() && !d.secret.is_empty() => d.clone(),
+        _ => return login_failed("未配置 Discourse"),
     };
-    let username = match body.get("username").and_then(Value::as_str) {
-        Some(u) => u.to_string(),
-        None => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "缺少 username 字段" }))).into_response(),
+
+    let mut return_to: Option<String> = None;
+    let claims_result = discourse::verify_and_parse(&q.sso, &q.sig, &disc.secret, |nonce| {
+        if let Some(rt) = state.nonces.consume(nonce) {
+            return_to = Some(rt);
+            true
+        } else {
+            false
+        }
+    });
+
+    let claims = match claims_result {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("Discourse 回调校验失败: {}", e);
+            return login_failed(&e);
+        }
     };
-    let password = match body.get("password").and_then(Value::as_str) {
-        Some(p) => p.to_string(),
-        None => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "缺少 password 字段" }))).into_response(),
+
+    let token = match super::auth::create_user_token(&claims, &state.panel_cfg.secret) {
+        Ok(t) => t,
+        Err(e) => {
+            log::error!("签发用户 JWT 失败: {}", e);
+            return login_failed("签发 token 失败");
+        }
     };
-    if username != auth.username {
-        return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "用户名或密码错误" }))).into_response();
+
+    let next = return_to.unwrap_or_else(|| "/".to_string());
+    let cookie = format!(
+        "{}={}; HttpOnly; Path=/; Max-Age={}; SameSite=Lax",
+        AUTH_COOKIE, token, 7 * 24 * 3600
+    );
+
+    let mut resp = Redirect::temporary(&next).into_response();
+    if let Ok(v) = HeaderValue::from_str(&cookie) {
+        resp.headers_mut().append(header::SET_COOKIE, v);
     }
-    match bcrypt::verify(&password, &auth.password) {
-        Ok(true) => {}
-        _ => return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "用户名或密码错误" }))).into_response(),
+    resp
+}
+
+fn login_failed(msg: &str) -> Response {
+    let body = format!(
+        "<!doctype html><html><body><h3>登录失败</h3><p>{}</p><a href=\"/login\">返回</a></body></html>",
+        html_escape(msg)
+    );
+    let mut resp = (StatusCode::UNAUTHORIZED, body).into_response();
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    resp
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+fn build_callback_url(req: &Request, panel_cfg: &PanelConfig) -> String {
+    let scheme = if panel_cfg.tls_cert.is_some() || panel_cfg.tls_key.is_some() {
+        "https"
+    } else {
+        req.headers()
+            .get("x-forwarded-proto")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("http")
+    };
+    let host = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or(&panel_cfg.listen);
+    format!("{}://{}/api/auth/discourse/callback", scheme, host)
+}
+
+async fn handle_me(State(state): State<MasterState>, req: Request) -> Response {
+    let token = match super::auth::extract_cookie(req.headers(), AUTH_COOKIE) {
+        Some(t) => t,
+        None => return unauthorized("未登录"),
+    };
+    match super::auth::verify_user_token(&token, &state.panel_cfg.secret) {
+        Ok(c) => Json(json!({
+            "ok": true,
+            "user": {
+                "id": c.sub,
+                "username": c.username,
+                "name": c.name,
+                "email": c.email,
+                "avatar": c.avatar,
+                "admin": c.admin,
+            }
+        }))
+        .into_response(),
+        Err(_) => unauthorized("登录已过期"),
     }
-    match super::auth::create_token(&username, &state.panel_cfg.secret) {
-        Ok(token) => Json(json!({ "token": token })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+}
+
+async fn handle_logout() -> Response {
+    let expired = format!("{}=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax", AUTH_COOKIE);
+    let mut resp = Json(json!({ "ok": true })).into_response();
+    if let Ok(v) = HeaderValue::from_str(&expired) {
+        resp.headers_mut().append(header::SET_COOKIE, v);
     }
+    resp
 }
 
 // ── 节点 CRUD ─────────────────────────────────────────────────────

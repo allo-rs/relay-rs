@@ -1,5 +1,6 @@
 mod assets;
-mod auth;
+pub mod auth;
+mod discourse;
 mod master;
 mod node;
 mod tls;
