@@ -1,8 +1,10 @@
 mod config;
 mod ctl;
+mod db;
 mod dns_cache;
 mod ip;
 mod nft;
+mod panel;
 mod proxy;
 mod relay_state;
 
@@ -74,12 +76,17 @@ enum Command {
     Mode,
     /// 查看各规则流量统计
     Stats,
+    /// 设置面板管理员密码（master 模式）
+    PanelPasswd,
     /// 以守护进程模式运行（供 systemd 调用）
     #[command(hide = true)]
     Daemon,
 }
 
 fn main() {
+    // rustls 0.23 需要显式安装加密提供者，在任何 TLS 操作之前调用
+    rustls::crypto::ring::default_provider().install_default().ok();
+
     let cli = Cli::parse();
     match cli.command {
         Some(cmd) => run_ctl(cmd, &cli.config, cli.interval),
@@ -188,6 +195,70 @@ fn run_ctl(cmd: Command, config: &str, interval: u64) {
                 Err(e) => { eprintln!("错误: {}", e); std::process::exit(1); }
             }
         }
+        Command::PanelPasswd => panel_passwd(config),
+    }
+}
+
+/// 交互式设置面板管理员用户名和密码，并自动生成 Ed25519 密钥对（如未生成）
+fn panel_passwd(config_path: &str) {
+    use base64::Engine as _;
+    use dialoguer::{Input, Password, theme::ColorfulTheme};
+    let theme = ColorfulTheme::default();
+
+    let mut cfg = config::load(config_path).unwrap_or_default();
+
+    let panel = cfg.panel.get_or_insert_with(|| config::PanelConfig {
+        mode: config::PanelMode::Master,
+        listen: "0.0.0.0:9090".to_string(),
+        secret: String::new(),
+        private_key: None,
+        master_pubkey: None,
+        tls_cert: None,
+        tls_key: None,
+        auth: None,
+        nodes: Vec::new(),
+        database_url: None,
+    });
+
+    // 自动生成 Ed25519 密钥对（仅首次运行）
+    if panel.private_key.is_none() {
+        println!("首次运行，正在生成 Ed25519 密钥对...");
+        let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519)
+            .unwrap_or_else(|e| { eprintln!("生成密钥对失败: {}", e); std::process::exit(1); });
+        let priv_pem = key_pair.serialize_pem();
+        let pub_der = key_pair.public_key_der();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&pub_der);
+        let lines: Vec<&str> = b64.as_bytes().chunks(64)
+            .map(|c| std::str::from_utf8(c).unwrap_or(""))
+            .collect();
+        let pub_pem = format!(
+            "-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----\n",
+            lines.join("\n")
+        );
+        panel.private_key = Some(priv_pem);
+        println!("\n节点配置中的 master_pubkey：\n{}", pub_pem);
+    }
+
+    let username: String = Input::with_theme(&theme)
+        .with_prompt("管理员用户名")
+        .with_initial_text(panel.auth.as_ref().map(|a| a.username.as_str()).unwrap_or("admin"))
+        .interact_text()
+        .unwrap_or_else(|_| std::process::exit(1));
+
+    let password = Password::with_theme(&theme)
+        .with_prompt("管理员密码")
+        .with_confirmation("确认密码", "两次输入不一致，请重试")
+        .interact()
+        .unwrap_or_else(|_| std::process::exit(1));
+
+    let hash = bcrypt::hash(&password, bcrypt::DEFAULT_COST)
+        .unwrap_or_else(|e| { eprintln!("密码加密失败: {}", e); std::process::exit(1); });
+
+    panel.auth = Some(config::PanelAuth { username, password: hash });
+
+    match config::save(&cfg, config_path) {
+        Ok(_) => println!("面板密码已更新。"),
+        Err(e) => { eprintln!("保存失败: {}", e); std::process::exit(1); }
     }
 }
 
@@ -402,6 +473,20 @@ fn run_daemon(config_path: &str, interval: u64) {
 }
 
 fn run_nat_daemon(config_path: &str, interval: u64, reload: Arc<AtomicBool>) {
+    // 若 nat 模式配置了面板，在独立线程中启动 tokio runtime 运行面板
+    if let Ok(cfg) = config::load(config_path) {
+        if let Some(pcfg) = cfg.panel {
+            let cp = config_path.to_string();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .expect("无法创建 panel runtime");
+                rt.block_on(panel::run(pcfg, cp));
+            });
+        }
+    }
+
     let mut last_script = String::new();
     let mut next_sleep  = interval.clamp(MIN_INTERVAL, MAX_INTERVAL);
 
@@ -429,7 +514,17 @@ fn run_relay_daemon(config_path: &str, reload: Arc<AtomicBool>) {
         .enable_all()
         .build()
         .expect("无法创建 proxy runtime");
-    rt.block_on(proxy::run(config_path, reload));
+
+    // 若配置了面板，则并发启动
+    let panel_cfg = config::load(config_path).ok().and_then(|c| c.panel);
+    let config_path_owned = config_path.to_string();
+
+    rt.block_on(async move {
+        if let Some(pcfg) = panel_cfg {
+            tokio::spawn(panel::run(pcfg, config_path_owned.clone()));
+        }
+        proxy::run(&config_path_owned, reload).await;
+    });
 }
 
 /// 根据最小 TTL 和用户配置计算实际轮询间隔

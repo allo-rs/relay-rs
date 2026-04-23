@@ -92,7 +92,65 @@ pub struct Config {
     pub forward: Vec<ForwardRule>,
     #[serde(default)]
     pub block: Vec<BlockRule>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panel: Option<PanelConfig>,
 }
+
+// ── 面板配置 ──────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PanelMode {
+    #[default]
+    Node,
+    Master,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct NodeEntry {
+    pub name: String,
+    pub url: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct PanelAuth {
+    pub username: String,
+    /// bcrypt hash，用 `relay-rs panel passwd` 生成
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct PanelConfig {
+    #[serde(default)]
+    pub mode: PanelMode,
+    /// 监听地址，如 "0.0.0.0:9090"
+    #[serde(default = "default_panel_listen")]
+    pub listen: String,
+    /// master 模式：面板 Web 登录的 JWT 签名密钥（HMAC）
+    #[serde(default)]
+    pub secret: String,
+    /// master 模式：Ed25519 私钥 PEM（PKCS8），用于签署对 node 的 API 调用
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_key: Option<String>,
+    /// node 模式：主控的 Ed25519 公钥 PEM，用于验证主控请求
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub master_pubkey: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_cert: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_key: Option<String>,
+    /// master 模式下的面板登录凭据
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<PanelAuth>,
+    /// master 管理的 node 列表（有 database_url 时由数据库管理，此字段忽略）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<NodeEntry>,
+    /// PostgreSQL 连接字符串（master 模式必填）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_url: Option<String>,
+}
+
+fn default_panel_listen() -> String { "0.0.0.0:9090".to_string() }
 
 impl ForwardMode {
     fn is_nat(&self) -> bool { *self == ForwardMode::Nat }
