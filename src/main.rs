@@ -1005,9 +1005,24 @@ fn run_master_daemon(db_url: &str, listen: &str, interval: u64) {
         let pool = db::connect(&db_url).await.expect("DB连接失败");
         db::ensure_schema(&pool).await.expect("建表失败");
 
-        // 从 DB 构建 PanelConfig
+        // 从 DB 构建 PanelConfig（首次启动时自动生成密钥）
         let secret = db::get_or_create_secret(&pool).await.expect("获取 secret 失败");
-        let private_key = db::get_private_key(&pool).await.unwrap_or(None);
+        let private_key = match db::get_private_key(&pool).await.unwrap_or(None) {
+            Some(pem) => Some(pem),
+            None => {
+                log::info!("首次启动，生成 Ed25519 主控密钥...");
+                match rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519) {
+                    Ok(kp) => {
+                        let pem = kp.serialize_pem();
+                        if let Err(e) = db::set_private_key(&pool, &pem).await {
+                            log::error!("存储主控私钥失败: {}", e);
+                        }
+                        Some(pem)
+                    }
+                    Err(e) => { log::error!("生成 Ed25519 密钥失败: {}", e); None }
+                }
+            }
+        };
         let mode = db::get_forward_mode(&pool).await.unwrap_or_default();
 
         let panel_cfg = config::PanelConfig {

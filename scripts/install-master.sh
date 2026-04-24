@@ -136,10 +136,6 @@ ENV
   echo "▶ 已写入 $ENV_FILE"
 fi
 
-# ── 初始化主控密钥 ────────────────────────────────────────────────
-echo "▶ 初始化主控 Ed25519 密钥..."
-DATABASE_URL="$DB_URL" "$INSTALL_BIN" panel-init
-
 # ── systemd 服务 ──────────────────────────────────────────────────
 cat > "$SERVICE_FILE" <<UNIT
 [Unit]
