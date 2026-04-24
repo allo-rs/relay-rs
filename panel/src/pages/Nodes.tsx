@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import PageShell from "@/components/PageShell";
 import NodeCard from "@/components/NodeCard";
 import AddNodeDialog from "@/components/AddNodeDialog";
+import ConfirmDialog from "@/components/ConfirmDialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { getNodes, deleteNode } from "@/lib/api";
@@ -12,6 +13,7 @@ import { getNodes, deleteNode } from "@/lib/api";
 export default function Nodes() {
   const queryClient = useQueryClient();
   const [addOpen, setAddOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: number; name: string } | null>(null);
 
   const { data: nodes, isLoading, error, refetch, isFetching } = useQuery({
     queryKey: ["nodes"],
@@ -24,14 +26,14 @@ export default function Nodes() {
     onSuccess: () => {
       toast.success("节点已删除");
       queryClient.invalidateQueries({ queryKey: ["nodes"] });
+      queryClient.invalidateQueries({ queryKey: ["forwards-aggregate"] });
+      setDeleteTarget(null);
     },
-    onError: (err) => toast.error(err instanceof Error ? err.message : "删除失败"),
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "删除失败");
+      setDeleteTarget(null);
+    },
   });
-
-  function handleDelete(id: number, name: string) {
-    if (!window.confirm(`确认删除节点「${name}」？`)) return;
-    delMutation.mutate(id);
-  }
 
   return (
     <PageShell
@@ -99,7 +101,7 @@ export default function Nodes() {
               <NodeCard
                 key={node.id}
                 node={node}
-                onDelete={() => handleDelete(node.id, node.name)}
+                onDelete={() => setDeleteTarget({ id: node.id, name: node.name })}
               />
             ))}
           </div>
@@ -110,6 +112,17 @@ export default function Nodes() {
         open={addOpen}
         onOpenChange={setAddOpen}
         onSuccess={() => queryClient.invalidateQueries({ queryKey: ["nodes"] })}
+      />
+
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}
+        title={`删除节点「${deleteTarget?.name ?? ""}」`}
+        description="此操作不可撤销，该节点的所有转发规则配置将无法通过面板管理。"
+        confirmLabel="确认删除"
+        destructive
+        loading={delMutation.isPending}
+        onConfirm={() => deleteTarget && delMutation.mutate(deleteTarget.id)}
       />
     </PageShell>
   );

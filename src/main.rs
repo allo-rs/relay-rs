@@ -97,7 +97,8 @@ enum Command {
 
 fn main() {
     // 自动加载 /etc/relay-rs/env（DATABASE_URL 未设置时）
-    if std::env::var("DATABASE_URL").is_err() {
+    // 若设置了 RELAY_NO_AUTOLOAD_ENV=1（node service 会设置），跳过加载，避免 node 误读到 master 的 env
+    if std::env::var("RELAY_NO_AUTOLOAD_ENV").is_err() && std::env::var("DATABASE_URL").is_err() {
         if let Ok(content) = std::fs::read_to_string("/etc/relay-rs/env") {
             for line in content.lines() {
                 let line = line.trim();

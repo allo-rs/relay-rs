@@ -1,9 +1,10 @@
-import { useState, useEffect } from "react";
+import { useEffect } from "react";
 import { useForm, useFieldArray } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
+import { useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -16,15 +17,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { NativeSelect } from "@/components/ui/select";
-import { addForwardRule, getNodes } from "@/lib/api";
-import type { ForwardRule, NodeInfo } from "@/lib/types";
+import { getNodeRules, putNodeRules } from "@/lib/api";
+import type { ForwardRule } from "@/lib/types";
 
 const schema = z.object({
-  node_id: z.coerce.number().int().positive("请选择节点"),
   listen: z.string().min(1, "监听端口不能为空"),
-  to: z
-    .array(z.object({ value: z.string().min(1, "目标地址不能为空") }))
-    .min(1, "至少需要一个目标地址"),
+  to: z.array(z.object({ value: z.string().min(1, "目标地址不能为空") })).min(1),
   proto: z.enum(["all", "tcp", "udp"]),
   ipv6: z.boolean(),
   balance: z.enum(["round-robin", "random"]).optional(),
@@ -34,22 +32,24 @@ const schema = z.object({
 
 type FormValues = z.infer<typeof schema>;
 
-interface AddForwardDialogProps {
+interface EditForwardDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** 不传时显示节点选择器（用于跨节点的「转发」总览页） */
-  nodeId?: number;
+  nodeId: number;
+  idx: number;
+  rule: ForwardRule;
   onSuccess: () => void;
 }
 
-export default function AddForwardDialog({
+export default function EditForwardDialog({
   open,
   onOpenChange,
   nodeId,
+  idx,
+  rule,
   onSuccess,
-}: AddForwardDialogProps) {
+}: EditForwardDialogProps) {
   const [submitting, setSubmitting] = useState(false);
-  const [nodes, setNodes] = useState<NodeInfo[]>([]);
 
   const {
     register,
@@ -61,33 +61,13 @@ export default function AddForwardDialog({
     formState: { errors },
   } = useForm<FormValues>({
     resolver: zodResolver(schema),
-    defaultValues: {
-      node_id: nodeId ?? 0,
-      listen: "",
-      to: [{ value: "" }],
-      proto: "all",
-      ipv6: false,
-      comment: "",
-    },
+    defaultValues: ruleToForm(rule),
   });
 
-  // 跨节点模式下加载节点列表
+  // 每次打开时用最新 rule 填充表单
   useEffect(() => {
-    if (!open || nodeId !== undefined) return;
-    getNodes()
-      .then((list) => {
-        setNodes(list);
-        if (list.length > 0 && list[0]) {
-          setValue("node_id", list[0].id);
-        }
-      })
-      .catch(() => {});
-  }, [open, nodeId, setValue]);
-
-  // 外部 nodeId 变化时同步
-  useEffect(() => {
-    if (nodeId !== undefined) setValue("node_id", nodeId);
-  }, [nodeId, setValue]);
+    if (open) reset(ruleToForm(rule));
+  }, [open, rule, reset]);
 
   const { fields, append, remove } = useFieldArray({ control, name: "to" });
   const toValues = watch("to");
@@ -96,87 +76,53 @@ export default function AddForwardDialog({
   async function onSubmit(values: FormValues) {
     setSubmitting(true);
     try {
-      const rule: ForwardRule = {
+      // 拉取完整规则集，只替换目标索引，保留其余规则
+      const current = await getNodeRules(nodeId);
+      const updated: ForwardRule = {
         listen: values.listen,
         to: values.to.map((t) => t.value),
         proto: values.proto,
         ipv6: values.ipv6,
-        comment: values.comment || undefined,
         balance: showBalance ? values.balance : undefined,
         rate_limit: values.rate_limit || undefined,
+        comment: values.comment || undefined,
       };
-      await addForwardRule(values.node_id, rule);
-      toast.success("转发规则添加成功");
-      reset();
+      const newForward = [...current.forward];
+      newForward[idx] = updated;
+      await putNodeRules(nodeId, { forward: newForward, block: current.block });
+      toast.success("转发规则已更新");
       onOpenChange(false);
       onSuccess();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "添加失败");
+      toast.error(err instanceof Error ? err.message : "更新失败");
     } finally {
       setSubmitting(false);
     }
   }
 
-  function handleClose() {
-    reset();
-    onOpenChange(false);
-  }
-
   return (
-    <Dialog open={open} onOpenChange={handleClose}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-[520px]">
         <DialogHeader>
-          <DialogTitle>添加转发规则</DialogTitle>
+          <DialogTitle>编辑转发规则</DialogTitle>
         </DialogHeader>
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
-          {/* 节点选择（仅跨节点模式） */}
-          {nodeId === undefined && (
-            <div className="space-y-1.5">
-              <Label htmlFor="node_id">目标节点 *</Label>
-              <NativeSelect id="node_id" {...register("node_id")}>
-                {nodes.length === 0 && <option value={0}>暂无节点</option>}
-                {nodes.map((n) => (
-                  <option key={n.id} value={n.id}>
-                    {n.name}
-                  </option>
-                ))}
-              </NativeSelect>
-              {errors.node_id && (
-                <p className="text-xs text-destructive">{errors.node_id.message}</p>
-              )}
-            </div>
-          )}
-
-          {/* 监听端口 */}
           <div className="space-y-1.5">
             <Label htmlFor="listen">监听端口 *</Label>
-            <Input
-              id="listen"
-              placeholder="10000 或 10000-10100"
-              {...register("listen")}
-            />
+            <Input id="listen" placeholder="10000 或 10000-10100" {...register("listen")} />
             {errors.listen && (
               <p className="text-xs text-destructive">{errors.listen.message}</p>
             )}
           </div>
 
-          {/* 目标地址（多个） */}
           <div className="space-y-1.5">
             <Label>目标地址 *</Label>
             <div className="space-y-2">
-              {fields.map((field, idx) => (
+              {fields.map((field, i) => (
                 <div key={field.id} className="flex gap-2">
-                  <Input
-                    placeholder="host:port"
-                    {...register(`to.${idx}.value`)}
-                  />
+                  <Input placeholder="host:port" {...register(`to.${i}.value`)} />
                   {fields.length > 1 && (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="icon"
-                      onClick={() => remove(idx)}
-                    >
+                    <Button type="button" variant="outline" size="icon" onClick={() => remove(i)}>
                       <Trash2 className="h-4 w-4" />
                     </Button>
                   )}
@@ -186,8 +132,8 @@ export default function AddForwardDialog({
                 type="button"
                 variant="outline"
                 size="sm"
-                onClick={() => append({ value: "" })}
                 className="gap-1"
+                onClick={() => append({ value: "" })}
               >
                 <Plus className="h-4 w-4" />
                 添加目标
@@ -200,7 +146,6 @@ export default function AddForwardDialog({
             )}
           </div>
 
-          {/* 协议 */}
           <div className="space-y-1.5">
             <Label htmlFor="proto">协议</Label>
             <NativeSelect id="proto" {...register("proto")}>
@@ -210,7 +155,6 @@ export default function AddForwardDialog({
             </NativeSelect>
           </div>
 
-          {/* 负载均衡（仅多目标时显示） */}
           {showBalance && (
             <div className="space-y-1.5">
               <Label htmlFor="balance">负载均衡</Label>
@@ -222,7 +166,6 @@ export default function AddForwardDialog({
             </div>
           )}
 
-          {/* IPv6 */}
           <div className="flex items-center gap-3">
             <Switch
               id="ipv6"
@@ -232,9 +175,8 @@ export default function AddForwardDialog({
             <Label htmlFor="ipv6">启用 IPv6</Label>
           </div>
 
-          {/* 限速 */}
           <div className="space-y-1.5">
-            <Label htmlFor="rate_limit">限速 (Mbps，可选)</Label>
+            <Label htmlFor="rate_limit">限速（Mbps，可选）</Label>
             <Input
               id="rate_limit"
               type="number"
@@ -244,22 +186,33 @@ export default function AddForwardDialog({
             />
           </div>
 
-          {/* 备注 */}
           <div className="space-y-1.5">
             <Label htmlFor="comment">备注（可选）</Label>
             <Input id="comment" placeholder="备注信息" {...register("comment")} />
           </div>
 
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={handleClose}>
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
               取消
             </Button>
             <Button type="submit" disabled={submitting}>
-              {submitting ? "添加中..." : "确认添加"}
+              {submitting ? "保存中..." : "保存修改"}
             </Button>
           </DialogFooter>
         </form>
       </DialogContent>
     </Dialog>
   );
+}
+
+function ruleToForm(rule: ForwardRule): FormValues {
+  return {
+    listen: rule.listen,
+    to: rule.to.map((v) => ({ value: v })),
+    proto: rule.proto,
+    ipv6: rule.ipv6,
+    balance: rule.balance,
+    rate_limit: rule.rate_limit ?? "",
+    comment: rule.comment ?? "",
+  };
 }

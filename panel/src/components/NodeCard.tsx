@@ -1,5 +1,5 @@
 import { useNavigate } from "react-router-dom";
-import { Wifi, WifiOff, Loader2, ArrowRight, Trash2 } from "lucide-react";
+import { Wifi, WifiOff, Loader2, ArrowRight, Trash2, ArrowRightLeft } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import {
   Card,
@@ -11,7 +11,7 @@ import {
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { getNodeStatus } from "@/lib/api";
+import { getNodeStatus, getAllForwards } from "@/lib/api";
 import type { NodeInfo } from "@/lib/types";
 
 interface NodeCardProps {
@@ -28,6 +28,15 @@ export default function NodeCard({ node, onDelete }: NodeCardProps) {
     refetchInterval: 30_000,
     staleTime: 10_000,
   });
+
+  // 从已缓存的 forwards-aggregate 读取规则条数，不产生新请求
+  const { data: aggregate } = useQuery({
+    queryKey: ["forwards-aggregate"],
+    queryFn: getAllForwards,
+    staleTime: 30_000,
+    refetchInterval: 30_000,
+  });
+  const ruleCount = aggregate?.nodes.find((n) => n.id === node.id)?.rule_count;
 
   const online = status?.online ?? false;
   const version = status?.version;
@@ -65,6 +74,12 @@ export default function NodeCard({ node, onDelete }: NodeCardProps) {
           )}
           {mode && (
             <span>模式: <span className="text-foreground font-medium">{mode}</span></span>
+          )}
+          {ruleCount !== undefined && (
+            <span className="flex items-center gap-1">
+              <ArrowRightLeft className="h-3 w-3" />
+              <span className="text-foreground font-medium">{ruleCount}</span> 条规则
+            </span>
           )}
         </div>
       </CardContent>

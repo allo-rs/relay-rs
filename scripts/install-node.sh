@@ -96,6 +96,8 @@ Description=relay-rs node
 After=network.target
 
 [Service]
+# 防止 main() 自动加载 /etc/relay-rs/env（master 写的）导致 node 被误识别为 master
+Environment=RELAY_NO_AUTOLOAD_ENV=1
 ExecStart=$INSTALL_BIN --config $CONFIG_FILE daemon
 Restart=on-failure
 RestartSec=5
