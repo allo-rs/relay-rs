@@ -177,7 +177,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/allo-rs/relay-rs/main/script
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/allo-rs/relay-rs/main/scripts/install-node.sh) \
-  --port 9090 --pubkey-b64 <主控公钥 base64>
+  --port 19090 --pubkey-b64 <主控公钥 base64>
 ```
 
 ### 手动配置（可选）
@@ -187,7 +187,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/allo-rs/relay-rs/main/script
 ```toml
 [panel]
 mode = "node"
-listen = "0.0.0.0:9090"
+listen = "0.0.0.0:19090"
 master_pubkey = """
 -----BEGIN PUBLIC KEY-----
 ...

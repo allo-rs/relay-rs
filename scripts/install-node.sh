@@ -2,7 +2,7 @@
 # relay-rs 节点一键安装脚本
 # 用法：
 #   curl -fsSL https://raw.githubusercontent.com/allo-rs/relay-rs/main/scripts/install-node.sh \
-#     | bash -s -- --port 9090 --pubkey-b64 <base64_pubkey>
+#     | bash -s -- --port 19090 --pubkey-b64 <base64_pubkey>
 set -euo pipefail
 
 REPO="allo-rs/relay-rs"
@@ -11,7 +11,7 @@ CONFIG_DIR="/etc/relay-rs"
 CONFIG_FILE="$CONFIG_DIR/relay.toml"
 SERVICE_FILE="/etc/systemd/system/relay-rs.service"
 
-PORT=9090
+PORT=19090
 PUBKEY_B64=""
 
 [[ $EUID -ne 0 ]] && { echo "请以 root 运行"; exit 1; }

@@ -140,7 +140,7 @@ pub struct PanelConfig {
     pub database_url: Option<String>,
 }
 
-fn default_panel_listen() -> String { "0.0.0.0:9090".to_string() }
+fn default_panel_listen() -> String { "0.0.0.0:19090".to_string() }
 
 impl ForwardMode {
     fn is_nat(&self) -> bool { *self == ForwardMode::Nat }
