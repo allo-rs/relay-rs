@@ -1052,9 +1052,16 @@ fn run_master_daemon(db_url: &str, listen: &str, interval: u64) {
             Err(e) => log::warn!("无法注册 SIGHUP: {}", e),
         }
 
-        // 启动面板（异步任务）
+        // 面板在独立 OS 线程中运行，避免与 nat 循环互相阻塞
         let db_url_panel = db_url.clone();
-        tokio::spawn(panel::run(panel_cfg, db_url_panel));
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("无法创建 panel runtime");
+            rt.block_on(panel::run(panel_cfg, db_url_panel));
+        });
 
         // 根据模式运行 NAT 或 relay daemon
         match mode {
@@ -1064,7 +1071,6 @@ fn run_master_daemon(db_url: &str, listen: &str, interval: u64) {
             }
             config::ForwardMode::Relay => {
                 nft::clear_tables();
-                // TODO: relay 模式下从 DB 读规则暂不支持，使用 TODO 占位
                 log::warn!("主控 relay 模式暂未完整支持，将回退到 NAT 模式循环");
                 run_master_nat_loop(&pool, interval, reload).await;
             }
@@ -1124,10 +1130,15 @@ async fn tick_from_db(
                 Err(e) => { log::warn!("跳过目标 {}: {}", to_str, e); continue; }
             };
 
-            // DNS 解析（含 TTL）
-            let (ip, ttl) = match ip::resolve_with_ttl(&target.host, rule.ipv6) {
-                Ok(r) => r,
-                Err(e) => { log::warn!("跳过目标 {}: {}", to_str, e); continue; }
+            // DNS 解析：spawn_blocking 避免在 async 上下文里嵌套 block_on
+            let host_c = target.host.clone();
+            let ipv6 = rule.ipv6;
+            let (ip, ttl) = match tokio::task::spawn_blocking(move || {
+                ip::resolve_with_ttl(&host_c, ipv6)
+            }).await {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => { log::warn!("跳过目标 {}: {}", to_str, e); continue; }
+                Err(e)    => { log::warn!("跳过目标 {}: DNS任务异常: {}", to_str, e); continue; }
             };
 
             let ttl_display = if ttl == u32::MAX { "∞".to_string() } else { format!("{}s", ttl) };
