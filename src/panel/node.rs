@@ -1,3 +1,8 @@
+//! node 模式 HTTP API
+//!
+//! master 通过 Ed25519 JWT 签名调用本节点，修改 `/var/lib/relay-rs/state.json`
+//! 中的 forward/block 规则，并翻转共享的 reload 原子量通知 proxy 代际切换。
+
 use axum::{
     Json, Router,
     extract::{Path, Request, State},
@@ -10,17 +15,29 @@ use serde_json::{json, Value};
 use tower_http::cors::CorsLayer;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::config;
+use crate::node_state;
 
-/// node 模式共享状态
+/// node 路由共享状态
 #[derive(Clone)]
-struct NodeState {
-    config_path: String,
+pub struct NodeHandlerState {
+    state_path: String,
+    reload: Arc<AtomicBool>,
     write_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
-/// Ed25519 JWT 认证中间件（验证主控签发的短效 token）
+impl NodeHandlerState {
+    pub fn new(state_path: String, reload: Arc<AtomicBool>) -> Self {
+        Self {
+            state_path,
+            reload,
+            write_lock: Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+}
+
 async fn auth_middleware(
     State(master_pubkey): State<String>,
     req: Request,
@@ -44,9 +61,8 @@ async fn auth_middleware(
     }
 }
 
-/// 构建 node 模式路由
-pub fn router(master_pubkey: String, config_path: String) -> Router {
-    let state = NodeState { config_path, write_lock: Arc::new(tokio::sync::Mutex::new(())) };
+pub fn router(master_pubkey: String, state_path: String, reload: Arc<AtomicBool>) -> Router {
+    let state = NodeHandlerState::new(state_path, reload);
 
     let api = Router::new()
         .route("/api/status", get(handle_status))
@@ -66,7 +82,14 @@ pub fn router(master_pubkey: String, config_path: String) -> Router {
         .layer(CorsLayer::permissive())
 }
 
-/// GET /api/status
+fn notify_reload(state: &NodeHandlerState) {
+    state.reload.store(true, Ordering::Relaxed);
+}
+
+fn err_response(status: StatusCode, msg: String) -> Response {
+    (status, Json(json!({ "error": msg }))).into_response()
+}
+
 async fn handle_status() -> impl IntoResponse {
     Json(json!({
         "ok": true,
@@ -75,224 +98,106 @@ async fn handle_status() -> impl IntoResponse {
     }))
 }
 
-/// GET /api/rules
-async fn handle_get_rules(State(state): State<NodeState>) -> Response {
-    match config::load(&state.config_path) {
-        Ok(cfg) => Json(json!({
+async fn handle_get_rules(State(state): State<NodeHandlerState>) -> Response {
+    match node_state::load(&state.state_path) {
+        Ok(s) => Json(json!({
             "ok": true,
-            "forward": cfg.forward,
-            "block": cfg.block
+            "forward": s.forward,
+            "block": s.block,
+            "revision": s.revision,
         }))
         .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
-/// PUT /api/rules — body: { forward, block }
+async fn mutate<F>(state: &NodeHandlerState, f: F) -> Response
+where
+    F: FnOnce(&mut node_state::NodeState) -> Result<(), (StatusCode, String)>,
+{
+    let _guard = state.write_lock.lock().await;
+    let mut s = match node_state::load(&state.state_path) {
+        Ok(s) => s,
+        Err(e) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+
+    if let Err((code, msg)) = f(&mut s) {
+        return err_response(code, msg);
+    }
+
+    s.revision = s.revision.wrapping_add(1);
+
+    match node_state::save(&state.state_path, &s) {
+        Ok(_) => {
+            notify_reload(state);
+            Json(json!({ "ok": true, "revision": s.revision })).into_response()
+        }
+        Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
 async fn handle_put_rules(
-    State(state): State<NodeState>,
+    State(state): State<NodeHandlerState>,
     Json(body): Json<Value>,
 ) -> Response {
-    let _guard = state.write_lock.lock().await;
-    let mut cfg = match config::load(&state.config_path) {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": e.to_string() })),
-            )
-                .into_response();
+    mutate(&state, |s| {
+        if let Some(fwd) = body.get("forward") {
+            let rules: Vec<config::ForwardRule> = serde_json::from_value(fwd.clone())
+                .map_err(|e| (StatusCode::BAD_REQUEST, format!("forward 解析失败: {}", e)))?;
+            s.forward = rules;
         }
-    };
-
-    if let Some(fwd) = body.get("forward") {
-        match serde_json::from_value::<Vec<config::ForwardRule>>(fwd.clone()) {
-            Ok(rules) => cfg.forward = rules,
-            Err(e) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({ "error": format!("forward 解析失败: {}", e) })),
-                )
-                    .into_response();
-            }
+        if let Some(blk) = body.get("block") {
+            let rules: Vec<config::BlockRule> = serde_json::from_value(blk.clone())
+                .map_err(|e| (StatusCode::BAD_REQUEST, format!("block 解析失败: {}", e)))?;
+            s.block = rules;
         }
-    }
-
-    if let Some(blk) = body.get("block") {
-        match serde_json::from_value::<Vec<config::BlockRule>>(blk.clone()) {
-            Ok(rules) => cfg.block = rules,
-            Err(e) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({ "error": format!("block 解析失败: {}", e) })),
-                )
-                    .into_response();
-            }
-        }
-    }
-
-    match config::save(&cfg, &state.config_path) {
-        Ok(_) => {
-            trigger_reload();
-            Json(json!({ "ok": true })).into_response()
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
-    }
+        Ok(())
+    })
+    .await
 }
 
-/// POST /api/rules/forward — 追加一条转发规则
 async fn handle_add_forward(
-    State(state): State<NodeState>,
+    State(state): State<NodeHandlerState>,
     Json(rule): Json<config::ForwardRule>,
 ) -> Response {
-    let _guard = state.write_lock.lock().await;
-    let mut cfg = match config::load(&state.config_path) {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": e.to_string() })),
-            )
-                .into_response();
-        }
-    };
-
-    cfg.forward.push(rule);
-
-    match config::save(&cfg, &state.config_path) {
-        Ok(_) => {
-            trigger_reload();
-            Json(json!({ "ok": true })).into_response()
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
-    }
+    mutate(&state, |s| { s.forward.push(rule); Ok(()) }).await
 }
 
-/// DELETE /api/rules/forward/:idx — 删除第 idx 条（0-based）
 async fn handle_del_forward(
-    State(state): State<NodeState>,
+    State(state): State<NodeHandlerState>,
     Path(idx): Path<usize>,
 ) -> Response {
-    let _guard = state.write_lock.lock().await;
-    let mut cfg = match config::load(&state.config_path) {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": e.to_string() })),
-            )
-                .into_response();
+    mutate(&state, |s| {
+        if idx >= s.forward.len() {
+            return Err((StatusCode::BAD_REQUEST, format!("索引 {} 超出范围", idx)));
         }
-    };
-
-    if idx >= cfg.forward.len() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": format!("索引 {} 超出范围", idx) })),
-        )
-            .into_response();
-    }
-
-    cfg.forward.remove(idx);
-
-    match config::save(&cfg, &state.config_path) {
-        Ok(_) => {
-            trigger_reload();
-            Json(json!({ "ok": true })).into_response()
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
-    }
+        s.forward.remove(idx);
+        Ok(())
+    })
+    .await
 }
 
-/// POST /api/rules/block — 追加一条封锁规则
 async fn handle_add_block(
-    State(state): State<NodeState>,
+    State(state): State<NodeHandlerState>,
     Json(rule): Json<config::BlockRule>,
 ) -> Response {
-    let _guard = state.write_lock.lock().await;
-    let mut cfg = match config::load(&state.config_path) {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": e.to_string() })),
-            )
-                .into_response();
-        }
-    };
-
-    cfg.block.push(rule);
-
-    match config::save(&cfg, &state.config_path) {
-        Ok(_) => {
-            trigger_reload();
-            Json(json!({ "ok": true })).into_response()
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
-    }
+    mutate(&state, |s| { s.block.push(rule); Ok(()) }).await
 }
 
-/// DELETE /api/rules/block/:idx — 删除第 idx 条封锁规则（0-based）
 async fn handle_del_block(
-    State(state): State<NodeState>,
+    State(state): State<NodeHandlerState>,
     Path(idx): Path<usize>,
 ) -> Response {
-    let _guard = state.write_lock.lock().await;
-    let mut cfg = match config::load(&state.config_path) {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": e.to_string() })),
-            )
-                .into_response();
+    mutate(&state, |s| {
+        if idx >= s.block.len() {
+            return Err((StatusCode::BAD_REQUEST, format!("索引 {} 超出范围", idx)));
         }
-    };
-
-    if idx >= cfg.block.len() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": format!("索引 {} 超出范围", idx) })),
-        )
-            .into_response();
-    }
-
-    cfg.block.remove(idx);
-
-    match config::save(&cfg, &state.config_path) {
-        Ok(_) => {
-            trigger_reload();
-            Json(json!({ "ok": true })).into_response()
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
-    }
+        s.block.remove(idx);
+        Ok(())
+    })
+    .await
 }
 
-/// GET /api/stats — 读取 /tmp/relay-rs.stats 的 JSON
 async fn handle_stats() -> impl IntoResponse {
     match std::fs::read_to_string("/tmp/relay-rs.stats") {
         Ok(content) => match serde_json::from_str::<Value>(&content) {
@@ -303,15 +208,7 @@ async fn handle_stats() -> impl IntoResponse {
     }
 }
 
-/// POST /api/reload — 向 relay-rs systemd 服务发送 SIGHUP
-async fn handle_reload() -> impl IntoResponse {
-    trigger_reload();
+async fn handle_reload(State(state): State<NodeHandlerState>) -> impl IntoResponse {
+    notify_reload(&state);
     Json(json!({ "ok": true }))
-}
-
-/// 向 relay-rs systemd 服务发送 SIGHUP 触发热重载
-fn trigger_reload() {
-    let _ = std::process::Command::new("systemctl")
-        .args(["kill", "-s", "SIGHUP", crate::service_name()])
-        .status();
 }

@@ -5,12 +5,39 @@ mod master;
 mod node;
 mod tls;
 
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+
 use axum_server::tls_rustls::RustlsConfig;
 
 use crate::config::{PanelConfig, PanelMode};
 
 const DEFAULT_CERT_PATH: &str = "/etc/relay-rs/panel-cert.pem";
 const DEFAULT_KEY_PATH: &str = "/etc/relay-rs/panel-key.pem";
+
+/// node 模式专用入口（v0.x 引入）：不依赖 PanelConfig / TOML，纯 env 驱动
+pub async fn run_node(
+    listen: SocketAddr,
+    master_pubkey: String,
+    state_path: String,
+    reload: Arc<AtomicBool>,
+) {
+    if master_pubkey.trim().is_empty() {
+        log::error!("node 面板需要 master_pubkey，拒绝启动");
+        return;
+    }
+    log::info!("面板启动：node 模式，监听 {}（state: {}）", listen, state_path);
+    let router = node::router(master_pubkey, state_path, reload);
+
+    let listener = match tokio::net::TcpListener::bind(listen).await {
+        Ok(l) => l,
+        Err(e) => { log::error!("面板监听 {} 失败: {}", listen, e); return; }
+    };
+    if let Err(e) = axum::serve(listener, router).await {
+        log::error!("面板服务器异常退出: {}", e);
+    }
+}
 
 pub async fn run(panel_cfg: PanelConfig, config_path: String, pool: Option<sqlx::PgPool>) {
     let addr: std::net::SocketAddr = match panel_cfg.listen.parse() {
@@ -23,13 +50,16 @@ pub async fn run(panel_cfg: PanelConfig, config_path: String, pool: Option<sqlx:
 
     let router = match panel_cfg.mode {
         PanelMode::Node => {
+            // master/CLI 场景的遗留 node 模式：仍然按 TOML 路径运行
             let pubkey = panel_cfg.master_pubkey.clone().unwrap_or_default();
             if pubkey.trim().is_empty() {
                 log::error!("node 模式需要配置 master_pubkey，面板拒绝启动");
                 return;
             }
-            log::info!("面板启动：node 模式，监听 {}", addr);
-            node::router(pubkey, config_path)
+            log::warn!("legacy node 模式（通过 PanelConfig）已弃用，请使用 MASTER_PUBKEY_B64 env 启动");
+            // 传入一个无用的 reload 标志（该路径不再实际生效于 node 守护）
+            let reload = Arc::new(AtomicBool::new(false));
+            node::router(pubkey, config_path, reload)
         }
         PanelMode::Master => {
             // 优先使用调用方传入的共享连接池，避免重复建立连接

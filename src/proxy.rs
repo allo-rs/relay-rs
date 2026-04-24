@@ -25,9 +25,30 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 
-use crate::config::{Balance, ForwardRule, Listen, Proto};
+use crate::config::{Balance, BlockRule, ForwardRule, Listen, Proto};
 use crate::dns_cache::DnsCache;
 use crate::relay_state::{RelayState, SharedState, TokenBucket};
+
+/// 规则来源：master/CLI 场景从 TOML 读；node 场景从 state.json 读
+pub enum RuleSource {
+    Config(String),
+    NodeState(String),
+}
+
+impl RuleSource {
+    fn load(&self) -> Result<(Vec<ForwardRule>, Vec<BlockRule>), Box<dyn std::error::Error>> {
+        match self {
+            RuleSource::Config(p) => {
+                let c = crate::config::load(p)?;
+                Ok((c.forward, c.block))
+            }
+            RuleSource::NodeState(p) => {
+                let s = crate::node_state::load(p)?;
+                Ok((s.forward, s.block))
+            }
+        }
+    }
+}
 
 static RR_CTR: AtomicUsize = AtomicUsize::new(0);
 
@@ -40,22 +61,22 @@ const UDP_BUF_SIZE: usize = 65536;
 
 // ── 主循环 ────────────────────────────────────────────────────────
 
-pub async fn run(config_path: &str, reload: Arc<AtomicBool>) {
+pub async fn run(source: RuleSource, reload: Arc<AtomicBool>) {
     loop {
-        let cfg = match crate::config::load(config_path) {
-            Ok(c) => c,
+        let (forward_rules, block_rules) = match source.load() {
+            Ok(x) => x,
             Err(e) => {
-                log::error!("配置加载失败: {}", e);
+                log::error!("规则加载失败: {}", e);
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 continue;
             }
         };
 
         // 初始化 RelayState（block 规则 + 限速令牌桶）
-        let state = RelayState::new(cfg.block.clone());
+        let state = RelayState::new(block_rules.clone());
         {
             let mut limiters = state.limiters.lock().unwrap();
-            for rule in &cfg.forward {
+            for rule in &forward_rules {
                 if let Some(mbps) = rule.rate_limit {
                     limiters.insert(rule.listen.clone(), TokenBucket::new(mbps));
                 }
@@ -69,7 +90,7 @@ pub async fn run(config_path: &str, reload: Arc<AtomicBool>) {
 
         // 健康检查后台任务（每 30s，TCP 探测，失败时失效 DNS 缓存）
         {
-            let rules = cfg.forward.clone();
+            let rules = forward_rules.clone();
             let cache = dns_cache.clone();
             set.spawn(async move {
                 health_check_loop(rules, cache).await;
@@ -88,7 +109,7 @@ pub async fn run(config_path: &str, reload: Arc<AtomicBool>) {
             });
         }
 
-        for rule in cfg.forward {
+        for rule in forward_rules {
             let listen = match crate::config::Listen::parse(&rule.listen) {
                 Ok(l) => l,
                 Err(e) => { log::warn!("跳过规则 [{}]: {}", rule.listen, e); continue; }

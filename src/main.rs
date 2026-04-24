@@ -4,6 +4,7 @@ mod db;
 mod dns_cache;
 mod ip;
 mod nft;
+mod node_state;
 mod panel;
 mod proxy;
 mod relay_state;
@@ -18,9 +19,18 @@ use std::thread::sleep;
 use std::time::Duration;
 
 pub fn service_name() -> &'static str {
-    if std::env::var("DATABASE_URL").is_ok() { "relay-rs-master" } else { "relay-rs" }
+    if std::env::var("DATABASE_URL").is_ok() {
+        "relay-rs-master"
+    } else if std::env::var("MASTER_PUBKEY_B64").is_ok() {
+        "relay-rs-node"
+    } else {
+        "relay-rs"
+    }
 }
 const CONFIG_PATH: &str = "/etc/relay-rs/relay.toml";
+const NODE_STATE_PATH: &str = node_state::DEFAULT_STATE_PATH;
+const NODE_ENV_PATH: &str = "/etc/relay-rs/node.env";
+const LEGACY_TOML_PATH: &str = "/etc/relay-rs/relay.toml";
 /// 健康检查 TCP 连接超时
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(3);
 /// 轮询间隔下界：避免极短 TTL 导致高频 DNS 查询
@@ -96,15 +106,24 @@ enum Command {
 }
 
 fn main() {
-    // 自动加载 /etc/relay-rs/env（DATABASE_URL 未设置时）
-    // 若设置了 RELAY_NO_AUTOLOAD_ENV=1（node service 会设置），跳过加载，避免 node 误读到 master 的 env
-    if std::env::var("RELAY_NO_AUTOLOAD_ENV").is_err() && std::env::var("DATABASE_URL").is_err() {
-        if let Ok(content) = std::fs::read_to_string("/etc/relay-rs/env") {
-            for line in content.lines() {
-                let line = line.trim();
-                if line.is_empty() || line.starts_with('#') { continue; }
-                if let Some((k, v)) = line.split_once('=') {
-                    unsafe { std::env::set_var(k.trim(), v.trim()); }
+    // 自动加载 env 文件：
+    //   - 优先尝试 /etc/relay-rs/node.env（v0.x 起，node 专用：含 MASTER_PUBKEY_B64 / PANEL_LISTEN）
+    //   - 否则尝试 /etc/relay-rs/env（master 专用：含 DATABASE_URL）
+    // 若设置了 RELAY_NO_AUTOLOAD_ENV=1 则完全跳过，便于调试
+    if std::env::var("RELAY_NO_AUTOLOAD_ENV").is_err() {
+        let candidates = [NODE_ENV_PATH, "/etc/relay-rs/env"];
+        for path in &candidates {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                for line in content.lines() {
+                    let line = line.trim();
+                    if line.is_empty() || line.starts_with('#') { continue; }
+                    if let Some((k, v)) = line.split_once('=') {
+                        let key = k.trim();
+                        // 已显式设置的变量不覆盖
+                        if std::env::var(key).is_err() {
+                            unsafe { std::env::set_var(key, v.trim().trim_matches('"')); }
+                        }
+                    }
                 }
             }
         }
@@ -807,6 +826,14 @@ fn edit_config(config: &str) {
 fn run_daemon(config_path: &str, interval: u64) {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
+    // node 模式（v0.x 新分派）：MASTER_PUBKEY_B64 env 非空即视为 node
+    if let Ok(b64) = std::env::var("MASTER_PUBKEY_B64") {
+        if !b64.trim().is_empty() {
+            run_node_daemon(&b64);
+            return;
+        }
+    }
+
     let mode = config::load(config_path).map(|c| c.mode).unwrap_or_default();
     log::info!("relay-rs 启动，模式: {}", match mode {
         config::ForwardMode::Nat   => "nat (nftables)",
@@ -838,6 +865,67 @@ fn run_daemon(config_path: &str, interval: u64) {
             run_relay_daemon(config_path, reload);
         }
     }
+}
+
+// ── node 守护进程（env 驱动 / state.json 持久化） ──────────────────
+fn run_node_daemon(master_pubkey_b64: &str) {
+    use base64::Engine;
+    let pem_bytes = match base64::engine::general_purpose::STANDARD.decode(master_pubkey_b64.trim()) {
+        Ok(b) => b,
+        Err(e) => {
+            log::error!("MASTER_PUBKEY_B64 base64 解码失败: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let master_pubkey = match String::from_utf8(pem_bytes) {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("MASTER_PUBKEY_B64 不是合法 UTF-8: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let listen_addr: std::net::SocketAddr = std::env::var("PANEL_LISTEN")
+        .unwrap_or_else(|_| "0.0.0.0:19090".to_string())
+        .parse()
+        .unwrap_or_else(|e| {
+            log::error!("PANEL_LISTEN 地址无效: {}", e);
+            std::process::exit(1);
+        });
+
+    let state_path = std::env::var("NODE_STATE_PATH")
+        .unwrap_or_else(|_| NODE_STATE_PATH.to_string());
+
+    // 自动迁移老 TOML（一次性）
+    node_state::migrate_from_toml_if_needed(&state_path, LEGACY_TOML_PATH);
+
+    log::info!("relay-rs 启动，模式: node (env 驱动)，面板 {}，state {}", listen_addr, state_path);
+
+    let reload = Arc::new(AtomicBool::new(false));
+    // 仍然注册 SIGHUP：外部触发兼容（不改 systemd 的人仍可用）
+    {
+        let reload_tx = Arc::clone(&reload);
+        if let Ok(mut signals) = signal_hook::iterator::Signals::new([signal_hook::consts::SIGHUP]) {
+            std::thread::spawn(move || {
+                for _ in signals.forever() { reload_tx.store(true, Ordering::Relaxed); }
+            });
+        }
+    }
+
+    nft::clear_tables();
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("无法创建 node runtime");
+
+    let sp = state_path.clone();
+    let reload_proxy = Arc::clone(&reload);
+    let reload_panel = Arc::clone(&reload);
+    rt.block_on(async move {
+        tokio::spawn(panel::run_node(listen_addr, master_pubkey, sp.clone(), reload_panel));
+        proxy::run(proxy::RuleSource::NodeState(sp), reload_proxy).await;
+    });
 }
 
 fn run_nat_daemon(config_path: &str, interval: u64, reload: Arc<AtomicBool>) {
@@ -891,7 +979,7 @@ fn run_relay_daemon(config_path: &str, reload: Arc<AtomicBool>) {
         if let Some(pcfg) = panel_cfg {
             tokio::spawn(panel::run(pcfg, config_path_owned.clone(), None));
         }
-        proxy::run(&config_path_owned, reload).await;
+        proxy::run(proxy::RuleSource::Config(config_path_owned.clone()), reload).await;
     });
 }
 

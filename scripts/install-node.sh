@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# relay-rs 节点一键安装脚本
+# relay-rs 节点一键安装脚本（v0.x：env 驱动，state.json 持久化，不再写 TOML）
 # 用法：
 #   curl -fsSL https://raw.githubusercontent.com/allo-rs/relay-rs/main/scripts/install-node.sh \
 #     | bash -s -- --port 19090 --pubkey-b64 <base64_pubkey>
@@ -8,10 +8,12 @@ set -euo pipefail
 REPO="allo-rs/relay-rs"
 INSTALL_BIN="/usr/local/bin/relay-rs"
 CONFIG_DIR="/etc/relay-rs"
-CONFIG_FILE="$CONFIG_DIR/relay.toml"
+ENV_FILE="$CONFIG_DIR/node.env"
+STATE_DIR="/var/lib/relay-rs"
 SERVICE_FILE="/etc/systemd/system/relay-rs-node.service"
 SERVICE_NAME="relay-rs-node"
 LEGACY_SERVICE_FILE="/etc/systemd/system/relay-rs.service"
+LEGACY_TOML="$CONFIG_DIR/relay.toml"
 
 PORT=19090
 PUBKEY_B64=""
@@ -31,7 +33,10 @@ if [[ -z "$PUBKEY_B64" ]]; then
   echo "错误：缺少 --pubkey-b64 参数"; exit 1
 fi
 
-MASTER_PUBKEY=$(echo "$PUBKEY_B64" | base64 -d)
+# 验证 base64 可解码
+if ! echo "$PUBKEY_B64" | base64 -d >/dev/null 2>&1; then
+  echo "错误：--pubkey-b64 不是合法的 base64"; exit 1
+fi
 
 # ── 检测架构 ──────────────────────────────────────────────────────
 ARCH=$(uname -m)
@@ -70,22 +75,30 @@ curl -fsSL --connect-timeout 10 --max-time 120 "$BIN_URL" -o "$TMP_BIN" || { rm 
 chmod +x "$TMP_BIN"
 mv "$TMP_BIN" "$INSTALL_BIN"
 
-# ── 写入配置 ──────────────────────────────────────────────────────
-echo "▶ 写入配置 $CONFIG_FILE..."
+# ── 准备目录 ──────────────────────────────────────────────────────
 mkdir -p "$CONFIG_DIR"
-cat > "$CONFIG_FILE" << TOML
-[panel]
-mode   = "node"
-listen = "0.0.0.0:${PORT}"
-master_pubkey = """
-${MASTER_PUBKEY}"""
-TOML
+install -d -m 0700 "$STATE_DIR"
 
-# ── 清理老服务（旧版本用的是 relay-rs.service，会与 master 冲突）──
+# ── 写入 env 文件（v0.x：唯一配置入口）────────────────────────────
+echo "▶ 写入配置 $ENV_FILE..."
+umask 077
+cat > "$ENV_FILE" << ENV
+# relay-rs node env（由 install-node.sh 生成，systemd EnvironmentFile 读取）
+MASTER_PUBKEY_B64=$PUBKEY_B64
+PANEL_LISTEN=0.0.0.0:$PORT
+ENV
+chmod 600 "$ENV_FILE"
+
+# ── 清理冲突：老 relay-rs.service（v1.7.7 之前会和 master 冲突）──
 if [[ -f "$LEGACY_SERVICE_FILE" ]]; then
   echo "▶ 清理旧服务 relay-rs.service..."
   systemctl disable --now relay-rs 2>/dev/null || true
   rm -f "$LEGACY_SERVICE_FILE"
+fi
+
+# 老 relay.toml 保留（node 首次启动会自动迁移为 state.json + relay.toml.migrated-bak）
+if [[ -f "$LEGACY_TOML" ]]; then
+  echo "▶ 检测到旧配置 $LEGACY_TOML，首次启动时将自动迁移到 $STATE_DIR/state.json"
 fi
 
 # ── 创建 systemd 服务 ─────────────────────────────────────────────
@@ -96,12 +109,13 @@ Description=relay-rs node
 After=network.target
 
 [Service]
-# 防止 main() 自动加载 /etc/relay-rs/env（master 写的）导致 node 被误识别为 master
-Environment=RELAY_NO_AUTOLOAD_ENV=1
-ExecStart=$INSTALL_BIN --config $CONFIG_FILE daemon
+Type=simple
+EnvironmentFile=$ENV_FILE
+ExecStart=$INSTALL_BIN daemon
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=65536
+StateDirectory=relay-rs
 
 [Install]
 WantedBy=multi-user.target
@@ -110,10 +124,13 @@ UNIT
 # ── 启动服务 ──────────────────────────────────────────────────────
 systemctl daemon-reload
 systemctl enable "$SERVICE_NAME"
-# 强制重启以应用新的二进制和 unit 文件（enable --now 对已活跃服务是 no-op）
+# 强制重启以应用新的二进制和 unit 文件
 systemctl restart "$SERVICE_NAME"
 
 echo ""
 echo "✓ relay-rs node 安装完成，版本 $VERSION"
 echo "  监听端口: $PORT"
+echo "  规则持久化: $STATE_DIR/state.json"
+echo "  env 文件:  $ENV_FILE"
 echo "  systemctl status $SERVICE_NAME"
+
