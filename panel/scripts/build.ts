@@ -1,7 +1,7 @@
 import { $ } from "bun";
 import { mkdirSync, writeFileSync } from "fs";
 
-const outDir = "../dist";
+const outDir = "./dist";
 mkdirSync(`${outDir}/assets`, { recursive: true });
 
 // 1. Tailwind CSS
