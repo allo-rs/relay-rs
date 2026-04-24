@@ -13,7 +13,7 @@ set -euo pipefail
 REPO="allo-rs/relay-rs"
 INSTALL_BIN="/usr/local/bin/relay-rs"
 CONFIG_DIR="/etc/relay-rs"
-CONFIG_FILE="$CONFIG_DIR/relay.toml"
+ENV_FILE="$CONFIG_DIR/env"
 SERVICE_FILE="/etc/systemd/system/relay-rs.service"
 
 PORT=9090
@@ -69,29 +69,22 @@ curl -fsSL --connect-timeout 10 --max-time 120 "$BIN_URL" -o "$INSTALL_BIN"
 chmod +x "$INSTALL_BIN"
 ln -sf "$INSTALL_BIN" /usr/local/bin/rr
 
-# ── 生成 secret 与配置文件 ────────────────────────────────────────
+# ── 写 env 文件 ───────────────────────────────────────────────────
 mkdir -p "$CONFIG_DIR"
-if [[ -f "$CONFIG_FILE" ]]; then
-  echo "⚠️  配置文件已存在：$CONFIG_FILE（跳过写入，仅更新二进制）"
+if [[ -f "$ENV_FILE" ]]; then
+  echo "⚠️  环境文件已存在：$ENV_FILE（跳过写入，仅更新二进制）"
 else
-  SECRET=$(head -c 32 /dev/urandom | base64 | tr -d '=+/' | cut -c1-40)
-  cat > "$CONFIG_FILE" <<TOML
-mode = "relay"
-forward = []
-block = []
-
-[panel]
-mode = "master"
-listen = "0.0.0.0:${PORT}"
-secret = "${SECRET}"
-database_url = "${DB_URL}"
-TOML
-  echo "▶ 已写入配置：$CONFIG_FILE"
+  cat > "$ENV_FILE" <<ENV
+DATABASE_URL=${DB_URL}
+PANEL_LISTEN=0.0.0.0:${PORT}
+ENV
+  chmod 600 "$ENV_FILE"
+  echo "▶ 已写入 $ENV_FILE"
 fi
 
 # ── 生成 Ed25519 主控密钥（首次）──────────────────────────────────
 echo "▶ 初始化主控 Ed25519 密钥..."
-"$INSTALL_BIN" --config "$CONFIG_FILE" panel-init
+DATABASE_URL="$DB_URL" "$INSTALL_BIN" panel-init
 
 # ── systemd 服务 ──────────────────────────────────────────────────
 cat > "$SERVICE_FILE" <<UNIT
@@ -100,7 +93,8 @@ Description=relay-rs master panel
 After=network.target
 
 [Service]
-ExecStart=$INSTALL_BIN --config $CONFIG_FILE daemon
+EnvironmentFile=/etc/relay-rs/env
+ExecStart=$INSTALL_BIN daemon
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=65536
@@ -125,5 +119,5 @@ echo "    --port 9090 --pubkey-b64 <主控公钥的 base64>"
 echo ""
 echo "常用命令："
 echo "  systemctl status relay-rs         查看服务状态"
-echo "  rr panel-reset-auth               清除 Discourse 配置（锁死救援）"
+echo "  rr panel-reset-auth               清除 Discourse 配置（锁死救援，DATABASE_URL 从 /etc/relay-rs/env 读取）"
 echo "  journalctl -u relay-rs -f         实时日志"

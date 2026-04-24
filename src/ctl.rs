@@ -8,8 +8,8 @@ use crate::ip;
 
 // ── rr list ───────────────────────────────────────────────────────
 
-pub fn list(config: &Config) {
-    let total = config.forward.len() + config.block.len();
+pub fn list(forward: &[ForwardRule], block: &[BlockRule]) {
+    let total = forward.len() + block.len();
     if total == 0 {
         println!("（暂无规则）");
         return;
@@ -17,9 +17,9 @@ pub fn list(config: &Config) {
 
     let mut idx = 1usize;
 
-    if !config.forward.is_empty() {
+    if !forward.is_empty() {
         println!("转发规则:");
-        for r in &config.forward {
+        for r in forward {
             let proto_hint = match r.proto {
                 Proto::All => String::new(),
                 Proto::Tcp => "  tcp".to_string(),
@@ -44,10 +44,10 @@ pub fn list(config: &Config) {
         }
     }
 
-    if !config.block.is_empty() {
-        if !config.forward.is_empty() { println!(); }
+    if !block.is_empty() {
+        if !forward.is_empty() { println!(); }
         println!("防火墙规则:");
-        for b in &config.block {
+        for b in block {
             let mut parts = Vec::new();
             if let Some(s) = &b.src  { parts.push(format!("src={}", s)); }
             if let Some(d) = &b.dst  { parts.push(format!("dst={}", d)); }
@@ -73,8 +73,8 @@ pub fn ping(target: &str) {
 
 // ── rr check ─────────────────────────────────────────────────────
 
-pub fn check(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
-    if config.forward.is_empty() {
+pub fn check(forward: &[ForwardRule]) -> Result<(), Box<dyn std::error::Error>> {
+    if forward.is_empty() {
         println!("（暂无转发规则）");
         return Ok(());
     }
@@ -83,7 +83,7 @@ pub fn check(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
 
     // 构建选项，首项为「检查全部」
     let mut items: Vec<String> = vec!["检查全部规则".to_string()];
-    for r in &config.forward {
+    for r in forward {
         let to_display = r.to.join(", ");
         let cmt = r.comment.as_deref().map(|s| format!(" # {}", s)).unwrap_or_default();
         items.push(format!("{}  →  {}{}", r.listen, to_display, cmt));
@@ -98,9 +98,9 @@ pub fn check(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     let rules_to_check: Vec<&ForwardRule> = if selection == 0 {
-        config.forward.iter().collect()
+        forward.iter().collect()
     } else {
-        vec![&config.forward[selection - 1]]
+        vec![&forward[selection - 1]]
     };
 
     for rule in rules_to_check {
@@ -180,7 +180,8 @@ pub fn add(config: &mut Config) -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-fn add_forward(config: &mut Config, theme: &ColorfulTheme) -> Result<(), Box<dyn std::error::Error>> {
+/// 通过交互式 UI 构建一条转发规则（不写入任何配置）
+pub fn build_forward_rule(theme: &ColorfulTheme) -> Result<ForwardRule, Box<dyn std::error::Error>> {
     let listen: String = Input::with_theme(theme)
         .with_prompt("本机端口（单端口 10000 或端口段 10000-10100）")
         .interact_text()?;
@@ -251,7 +252,7 @@ fn add_forward(config: &mut Config, theme: &ColorfulTheme) -> Result<(), Box<dyn
         .allow_empty(true)
         .interact_text()?;
 
-    config.forward.push(ForwardRule {
+    Ok(ForwardRule {
         listen,
         to: to_list,
         proto,
@@ -259,12 +260,17 @@ fn add_forward(config: &mut Config, theme: &ColorfulTheme) -> Result<(), Box<dyn
         balance,
         rate_limit,
         comment: if comment.is_empty() { None } else { Some(comment) },
-    });
+    })
+}
 
+fn add_forward(config: &mut Config, theme: &ColorfulTheme) -> Result<(), Box<dyn std::error::Error>> {
+    let rule = build_forward_rule(theme)?;
+    config.forward.push(rule);
     Ok(())
 }
 
-fn add_block(config: &mut Config, theme: &ColorfulTheme) -> Result<(), Box<dyn std::error::Error>> {
+/// 通过交互式 UI 构建一条防火墙规则（不写入任何配置）
+pub fn build_block_rule(theme: &ColorfulTheme) -> Result<BlockRule, Box<dyn std::error::Error>> {
     let src: String = Input::with_theme(theme)
         .with_prompt("源 IP 或 CIDR（可选，直接回车跳过）")
         .allow_empty(true)
@@ -307,13 +313,17 @@ fn add_block(config: &mut Config, theme: &ColorfulTheme) -> Result<(), Box<dyn s
         .allow_empty(true)
         .interact_text()?;
 
-    config.block.push(BlockRule {
+    Ok(BlockRule {
         src, dst, port, proto,
         chain: if chain_idx == 1 { Chain::Forward } else { Chain::Input },
         ipv6: false,
         comment: if comment.is_empty() { None } else { Some(comment) },
-    });
+    })
+}
 
+fn add_block(config: &mut Config, theme: &ColorfulTheme) -> Result<(), Box<dyn std::error::Error>> {
+    let rule = build_block_rule(theme)?;
+    config.block.push(rule);
     Ok(())
 }
 
@@ -433,7 +443,7 @@ pub fn edit(config: &mut Config) -> Result<bool, Box<dyn std::error::Error>> {
     Ok(true)
 }
 
-fn edit_forward(rule: ForwardRule, theme: &ColorfulTheme) -> Result<ForwardRule, Box<dyn std::error::Error>> {
+pub fn edit_forward(rule: ForwardRule, theme: &ColorfulTheme) -> Result<ForwardRule, Box<dyn std::error::Error>> {
     let listen: String = Input::with_theme(theme)
         .with_prompt("本机端口（单端口 10000 或端口段 10000-10100）")
         .with_initial_text(&rule.listen)
@@ -521,7 +531,7 @@ fn edit_forward(rule: ForwardRule, theme: &ColorfulTheme) -> Result<ForwardRule,
     })
 }
 
-fn edit_block(rule: BlockRule, theme: &ColorfulTheme) -> Result<BlockRule, Box<dyn std::error::Error>> {
+pub fn edit_block(rule: BlockRule, theme: &ColorfulTheme) -> Result<BlockRule, Box<dyn std::error::Error>> {
     let src: String = Input::with_theme(theme)
         .with_prompt("源 IP 或 CIDR（可选，回车清除）")
         .with_initial_text(rule.src.as_deref().unwrap_or(""))
@@ -579,7 +589,7 @@ fn edit_block(rule: BlockRule, theme: &ColorfulTheme) -> Result<BlockRule, Box<d
 
 // ── rr stats ─────────────────────────────────────────────────────
 
-pub fn stats(config_path: &str) {
+pub fn stats(is_relay: bool) {
     let mut found = false;
     for family in ["ip", "ip6"] {
         let output = std::process::Command::new("nft")
@@ -615,9 +625,6 @@ pub fn stats(config_path: &str) {
     }
 
     // relay 用户态代理模式统计（仅 relay 模式下显示）
-    let is_relay = crate::config::load(config_path)
-        .map(|c| c.mode == crate::config::ForwardMode::Relay)
-        .unwrap_or(false);
     if is_relay {
         if let Ok(content) = std::fs::read_to_string("/tmp/relay-rs.stats") {
             if let Ok(map) = serde_json::from_str::<std::collections::HashMap<String, serde_json::Value>>(&content) {
