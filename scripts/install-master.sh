@@ -18,7 +18,7 @@ CONFIG_DIR="/etc/relay-rs"
 ENV_FILE="$CONFIG_DIR/env"
 COMPOSE_DIR="/opt/relay-rs"
 COMPOSE_FILE="$COMPOSE_DIR/docker-compose.yml"
-SERVICE_FILE="/etc/systemd/system/relay-rs.service"
+SERVICE_FILE="/etc/systemd/system/relay-rs-master.service"
 
 DB_NAME="relay"
 DB_USER="relay"
@@ -159,7 +159,7 @@ WantedBy=multi-user.target
 UNIT
 
 systemctl daemon-reload
-systemctl enable --now relay-rs
+systemctl enable --now relay-rs-master
 
 echo ""
 echo "✅ 主控安装完成（版本 $VERSION）"
@@ -173,7 +173,7 @@ echo "  bash <(curl -fsSL https://raw.githubusercontent.com/allo-rs/relay-rs/mai
 echo "    --port 19090 --pubkey-b64 <主控公钥的 base64>"
 echo ""
 echo "常用命令："
-echo "  systemctl status relay-rs         查看服务状态"
+echo "  systemctl status relay-rs-master   查看服务状态"
 echo "  rr list                           查看转发规则"
 echo "  rr add                            添加转发规则"
 echo "  rr panel-reset-auth               清除 Discourse 配置（锁死救援）"

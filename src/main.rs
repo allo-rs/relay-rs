@@ -17,7 +17,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::sleep;
 use std::time::Duration;
 
-const SERVICE: &str = "relay-rs";
+fn service_name() -> &'static str {
+    if std::env::var("DATABASE_URL").is_ok() { "relay-rs-master" } else { "relay-rs" }
+}
 const CONFIG_PATH: &str = "/etc/relay-rs/relay.toml";
 /// 健康检查 TCP 连接超时
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(3);
@@ -771,13 +773,13 @@ fn pause() {
 
 fn systemctl_quiet(action: &str) {
     let _ = std::process::Command::new("systemctl")
-        .args([action, SERVICE])
+        .args([action, service_name()])
         .status();
 }
 
 fn systemctl(action: &str) {
     let status = std::process::Command::new("systemctl")
-        .args([action, SERVICE])
+        .args([action, service_name()])
         .status()
         .unwrap_or_else(|e| { eprintln!("执行 systemctl 失败: {}", e); std::process::exit(1); });
     std::process::exit(status.code().unwrap_or(1));
@@ -785,7 +787,7 @@ fn systemctl(action: &str) {
 
 fn journalctl() {
     let status = std::process::Command::new("journalctl")
-        .args(["-u", SERVICE, "-f"])
+        .args(["-u", service_name(), "-f"])
         .status()
         .unwrap_or_else(|e| { eprintln!("执行 journalctl 失败: {}", e); std::process::exit(1); });
     std::process::exit(status.code().unwrap_or(1));
