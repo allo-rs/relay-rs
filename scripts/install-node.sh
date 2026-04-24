@@ -9,7 +9,9 @@ REPO="allo-rs/relay-rs"
 INSTALL_BIN="/usr/local/bin/relay-rs"
 CONFIG_DIR="/etc/relay-rs"
 CONFIG_FILE="$CONFIG_DIR/relay.toml"
-SERVICE_FILE="/etc/systemd/system/relay-rs.service"
+SERVICE_FILE="/etc/systemd/system/relay-rs-node.service"
+SERVICE_NAME="relay-rs-node"
+LEGACY_SERVICE_FILE="/etc/systemd/system/relay-rs.service"
 
 PORT=19090
 PUBKEY_B64=""
@@ -79,6 +81,13 @@ master_pubkey = """
 ${MASTER_PUBKEY}"""
 TOML
 
+# ── 清理老服务（旧版本用的是 relay-rs.service，会与 master 冲突）──
+if [[ -f "$LEGACY_SERVICE_FILE" ]]; then
+  echo "▶ 清理旧服务 relay-rs.service..."
+  systemctl disable --now relay-rs 2>/dev/null || true
+  rm -f "$LEGACY_SERVICE_FILE"
+fi
+
 # ── 创建 systemd 服务 ─────────────────────────────────────────────
 echo "▶ 配置 systemd 服务..."
 cat > "$SERVICE_FILE" << UNIT
@@ -98,9 +107,9 @@ UNIT
 
 # ── 启动服务 ──────────────────────────────────────────────────────
 systemctl daemon-reload
-systemctl enable --now relay-rs
+systemctl enable --now "$SERVICE_NAME"
 
 echo ""
 echo "✓ relay-rs node 安装完成，版本 $VERSION"
 echo "  监听端口: $PORT"
-echo "  systemctl status relay-rs"
+echo "  systemctl status $SERVICE_NAME"
