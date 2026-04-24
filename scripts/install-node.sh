@@ -109,7 +109,9 @@ UNIT
 
 # ── 启动服务 ──────────────────────────────────────────────────────
 systemctl daemon-reload
-systemctl enable --now "$SERVICE_NAME"
+systemctl enable "$SERVICE_NAME"
+# 强制重启以应用新的二进制和 unit 文件（enable --now 对已活跃服务是 no-op）
+systemctl restart "$SERVICE_NAME"
 
 echo ""
 echo "✓ relay-rs node 安装完成，版本 $VERSION"
