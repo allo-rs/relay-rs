@@ -20,7 +20,7 @@ pub struct BlockRuleRow {
 }
 
 pub async fn connect(url: &str) -> Result<PgPool, sqlx::Error> {
-    PgPoolOptions::new().max_connections(3).connect(url).await
+    PgPoolOptions::new().max_connections(5).connect(url).await
 }
 
 /// 首次运行建表（幂等）
