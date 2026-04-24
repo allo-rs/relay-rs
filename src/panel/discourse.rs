@@ -51,20 +51,15 @@ impl NonceStore {
     }
 }
 
-/// 生成 len 个十六进制字符的随机串
+/// 生成 len 个十六进制字符的随机串（CSPRNG）
 fn random_hex(len: usize) -> String {
-    use std::time::SystemTime;
-    // 简易伪随机：系统时间 + 地址熵；安全性足够 nonce 抗猜测（外部还有 sig 校验）
-    let mut buf = Vec::with_capacity(len / 2);
-    let mut seed = SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos() as u64;
-    for _ in 0..len / 2 {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        buf.push((seed >> 33) as u8);
-    }
-    hex::encode(buf)
+    use std::io::Read;
+    let bytes = (len + 1) / 2;
+    let mut buf = vec![0u8; bytes];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut buf))
+        .unwrap_or(());
+    hex::encode(&buf).chars().take(len).collect()
 }
 
 /// 构造登录跳转 URL（panel → discourse）

@@ -23,8 +23,13 @@ pub async fn run(panel_cfg: PanelConfig, config_path: String, pool: Option<sqlx:
 
     let router = match panel_cfg.mode {
         PanelMode::Node => {
+            let pubkey = panel_cfg.master_pubkey.clone().unwrap_or_default();
+            if pubkey.trim().is_empty() {
+                log::error!("node 模式需要配置 master_pubkey，面板拒绝启动");
+                return;
+            }
             log::info!("面板启动：node 模式，监听 {}", addr);
-            node::router(panel_cfg.master_pubkey.clone().unwrap_or_default(), config_path)
+            node::router(pubkey, config_path)
         }
         PanelMode::Master => {
             // 优先使用调用方传入的共享连接池，避免重复建立连接

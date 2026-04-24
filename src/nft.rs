@@ -96,7 +96,7 @@ pub fn build_script(forwards: &[ResolvedForward], blocks: &[BlockRule]) -> Strin
 fn append_forward(s: &mut String, r: &ResolvedForward) {
     if r.targets.is_empty() { return; }
 
-    let cmt   = r.rule.comment.as_deref().unwrap_or("forward").replace('"', "'");
+    let cmt   = r.rule.comment.as_deref().unwrap_or("forward").replace('\\', "\\\\").replace('"', "'");
     let proto = proto_expr(&r.rule.proto);
 
     // 以第一个目标的地址族为准（所有目标应同族）
@@ -227,17 +227,38 @@ fn append_multi(
 
 // ── Block 规则生成 ────────────────────────────────────────────────
 
+fn is_valid_ip_or_cidr(s: &str) -> bool {
+    use std::net::IpAddr;
+    if let Some((addr, prefix)) = s.split_once('/') {
+        prefix.parse::<u8>().is_ok() && addr.parse::<IpAddr>().is_ok()
+    } else {
+        s.parse::<IpAddr>().is_ok()
+    }
+}
+
 fn append_block(s: &mut String, b: &BlockRule) {
     let fam   = if b.ipv6 { "ip6" } else { "ip" };
     let chain = match b.chain { Chain::Input => "INPUT", Chain::Forward => "FORWARD" };
-    let cmt   = b.comment.as_deref().unwrap_or("block").replace('"', "'");
+    let cmt   = b.comment.as_deref().unwrap_or("block").replace('\\', "\\\\").replace('"', "'");
 
     let mut conds: Vec<String> = Vec::new();
 
     let (saddr, daddr) = if b.ipv6 { ("ip6 saddr", "ip6 daddr") } else { ("ip saddr", "ip daddr") };
 
-    if let Some(ip) = &b.src { conds.push(format!("{} {}", saddr, ip)); }
-    if let Some(ip) = &b.dst { conds.push(format!("{} {}", daddr, ip)); }
+    if let Some(ip) = &b.src {
+        if !is_valid_ip_or_cidr(ip) {
+            log::warn!("跳过包含无效 src CIDR 的 block 规则: {}", ip);
+            return;
+        }
+        conds.push(format!("{} {}", saddr, ip));
+    }
+    if let Some(ip) = &b.dst {
+        if !is_valid_ip_or_cidr(ip) {
+            log::warn!("跳过包含无效 dst CIDR 的 block 规则: {}", ip);
+            return;
+        }
+        conds.push(format!("{} {}", daddr, ip));
+    }
 
     match &b.proto {
         Proto::Tcp | Proto::Udp => {

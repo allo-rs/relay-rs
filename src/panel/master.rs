@@ -110,8 +110,15 @@ pub fn router(panel_cfg: PanelConfig, _config_path: String, db: PgPool) -> Route
     {
         let s = state.clone();
         tokio::spawn(async move {
+            let mut first = true;
             loop {
                 s.reload_discourse().await;
+                if first {
+                    first = false;
+                    if s.discourse().is_none() {
+                        log::warn!("[安全] Discourse 未配置，面板处于开放访问模式（无需登录）");
+                    }
+                }
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             }
         });
@@ -181,7 +188,8 @@ async fn handle_discourse_login(
         }
     };
 
-    let next = q.next.unwrap_or_else(|| "/".to_string());
+    let raw_next = q.next.unwrap_or_else(|| "/".to_string());
+    let next = if raw_next.starts_with('/') && !raw_next.starts_with("//") { raw_next } else { "/".to_string() };
     let nonce = state.nonces.issue(next);
     let callback = build_callback_url(&req, &state.panel_cfg);
     let redirect = discourse::build_login_redirect(&disc.url, &disc.secret, &callback, &nonce);
@@ -231,9 +239,17 @@ async fn handle_discourse_callback(
     };
 
     let next = return_to.unwrap_or_else(|| "/".to_string());
+    // 防止开放重定向：只允许相对路径
+    let next = if next.starts_with('/') && !next.starts_with("//") { next } else { "/".to_string() };
+
+    let secure = if state.panel_cfg.tls_cert.is_some() || state.panel_cfg.tls_key.is_some() {
+        "; Secure"
+    } else {
+        ""
+    };
     let cookie = format!(
-        "{}={}; HttpOnly; Path=/; Max-Age={}; SameSite=Lax",
-        AUTH_COOKIE, token, 7 * 24 * 3600
+        "{}={}; HttpOnly; Path=/; Max-Age={}; SameSite=Lax{}",
+        AUTH_COOKIE, token, 7 * 24 * 3600, secure
     );
 
     let mut resp = Redirect::temporary(&next).into_response();
@@ -503,8 +519,12 @@ struct AddNodeBody { name: String, url: String }
 
 /// POST /api/nodes — 写入 DB，返回主控公钥供节点安装脚本使用
 async fn handle_add_node(State(state): State<MasterState>, Json(body): Json<AddNodeBody>) -> Response {
+    let url = body.url.trim().to_string();
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "url 需为 http(s):// 开头" }))).into_response();
+    }
     let pubkey = derive_pubkey_pem(state.panel_cfg.private_key.as_deref().unwrap_or(""));
-    match crate::db::add_node(&state.db, &body.name, &body.url).await {
+    match crate::db::add_node(&state.db, &body.name, &url).await {
         Ok(id) => Json(json!({ "ok": true, "id": id, "pubkey": pubkey })).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
     }
