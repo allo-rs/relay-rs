@@ -20,6 +20,8 @@ apt install nftables
 dnf install nftables
 ```
 
+> **主控模式**额外需要 Docker（安装脚本会自动安装）。
+
 ## 安装
 
 国内服务器（自动检测，走代理）：
@@ -159,15 +161,13 @@ relay-rs 支持可选的 Web 管理面板，采用主控（master）+ 被控（n
 
 ```bash
 # 国内（自动走代理）
-bash <(curl -fsSL https://gh-proxy.org/https://raw.githubusercontent.com/allo-rs/relay-rs/main/scripts/install-master.sh) \
-  --db "postgresql://relay:PASS@127.0.0.1:5432/relay?sslmode=disable" \
-  --port 9090
+bash <(curl -fsSL https://gh-proxy.org/https://raw.githubusercontent.com/allo-rs/relay-rs/main/scripts/install-master.sh)
 
 # 境外（直连）
-bash <(curl -fsSL https://raw.githubusercontent.com/allo-rs/relay-rs/main/scripts/install-master.sh) \
-  --db "postgresql://relay:PASS@127.0.0.1:5432/relay?sslmode=disable" \
-  --port 9090
+bash <(curl -fsSL https://raw.githubusercontent.com/allo-rs/relay-rs/main/scripts/install-master.sh)
 ```
+
+脚本全自动完成：安装 Docker → 启动 PostgreSQL（自动生成随机密码）→ 下载二进制 → 初始化密钥 → 注册 systemd 服务。运行过程中仅询问面板端口（默认 9090）。
 
 安装完成后访问 `http://<server-ip>:9090`，首次为开放模式，在「设置 → Discourse 接入」配置 SSO 后启用登录验证。
 
@@ -194,24 +194,15 @@ master_pubkey = """
 -----END PUBLIC KEY-----"""
 ```
 
-**Master 模式**（`/etc/relay-rs/relay.toml`）：
+**Master 模式**：所有配置存于 PostgreSQL，启动参数通过 `/etc/relay-rs/env` 注入：
 
-```toml
-[panel]
-mode = "master"
-listen = "0.0.0.0:9090"
-secret = "your-jwt-signing-secret"
-database_url = "postgresql://relay:PASS@127.0.0.1:5432/relay?sslmode=disable"
-
-# 可选：自定义 TLS 证书（不填则自动生成自签名证书）
-# tls_cert = "/path/to/cert.pem"
-# tls_key  = "/path/to/key.pem"
+```bash
+# /etc/relay-rs/env（由安装脚本自动生成，权限 600）
+DATABASE_URL=postgresql://relay:PASS@127.0.0.1:5432/relay?sslmode=disable
+PANEL_LISTEN=0.0.0.0:9090
 ```
 
 ```bash
-# 生成 Ed25519 主控密钥（手动配置后首次启动前执行）
-rr panel-init
-
 # Discourse SSO 配置锁死时恢复开放模式
 rr panel-reset-auth
 ```
@@ -228,7 +219,7 @@ rr panel-reset-auth
 **NAT 模式**：
 
 1. 启动时自动开启内核 IP 转发（`ip_forward`）
-2. 读取 `relay.toml`，对转发规则进行 DNS 解析
+2. 读取转发规则（node 模式从 `relay.toml`，master 模式从 PostgreSQL），对规则进行 DNS 解析
 3. 生成 nftables 脚本并执行（写入 `/etc/relay-rs/rules.nft`）
 4. 根据 DNS TTL（最短 15s，最长 300s）自动轮询，IP 变化时更新规则
 
