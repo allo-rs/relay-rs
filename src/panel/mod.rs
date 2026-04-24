@@ -12,7 +12,7 @@ use crate::config::{PanelConfig, PanelMode};
 const DEFAULT_CERT_PATH: &str = "/etc/relay-rs/panel-cert.pem";
 const DEFAULT_KEY_PATH: &str = "/etc/relay-rs/panel-key.pem";
 
-pub async fn run(panel_cfg: PanelConfig, config_path: String) {
+pub async fn run(panel_cfg: PanelConfig, config_path: String, pool: Option<sqlx::PgPool>) {
     let addr: std::net::SocketAddr = match panel_cfg.listen.parse() {
         Ok(a) => a,
         Err(e) => { log::error!("面板监听地址无效 {}: {}", panel_cfg.listen, e); return; }
@@ -27,18 +27,20 @@ pub async fn run(panel_cfg: PanelConfig, config_path: String) {
             node::router(panel_cfg.master_pubkey.clone().unwrap_or_default(), config_path)
         }
         PanelMode::Master => {
-            let db_url = match &panel_cfg.database_url {
-                Some(u) => u.clone(),
-                None => { log::error!("master 模式需要配置 database_url"); return; }
+            // 优先使用调用方传入的共享连接池，避免重复建立连接
+            let pool = match pool {
+                Some(p) => p,
+                None => {
+                    let db_url = match &panel_cfg.database_url {
+                        Some(u) => u.clone(),
+                        None => { log::error!("master 模式需要配置 database_url"); return; }
+                    };
+                    match crate::db::connect(&db_url).await {
+                        Ok(p) => p,
+                        Err(e) => { log::error!("数据库连接失败: {}", e); return; }
+                    }
+                }
             };
-            let pool = match crate::db::connect(&db_url).await {
-                Ok(p) => p,
-                Err(e) => { log::error!("数据库连接失败: {}", e); return; }
-            };
-            if let Err(e) = crate::db::ensure_schema(&pool).await {
-                log::error!("数据库初始化失败: {}", e);
-                return;
-            }
             log::info!("面板启动：master 模式，监听 {}（PostgreSQL 就绪）", addr);
             master::router(panel_cfg, config_path, pool)
         }

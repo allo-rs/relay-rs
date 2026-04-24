@@ -558,7 +558,7 @@ async fn handle_node_del_forward(
     Path((id, idx)): Path<(i32, usize)>,
 ) -> Response {
     with_node(&state, id, |c, n, pk| async move {
-        forward_method(c, n, reqwest::Method::DELETE, &format!("/api/rules/forward/:idx"), None, pk).await
+        forward_method(c, n, reqwest::Method::DELETE, &format!("/api/rules/forward/{idx}"), None, pk).await
     }).await
 }
 
@@ -577,7 +577,7 @@ async fn handle_node_del_block(
     Path((id, idx)): Path<(i32, usize)>,
 ) -> Response {
     with_node(&state, id, |c, n, pk| async move {
-        forward_method(c, n, reqwest::Method::DELETE, &format!("/api/rules/block/:idx"), None, pk).await
+        forward_method(c, n, reqwest::Method::DELETE, &format!("/api/rules/block/{idx}"), None, pk).await
     }).await
 }
 

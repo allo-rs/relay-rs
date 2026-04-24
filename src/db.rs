@@ -20,7 +20,10 @@ pub struct BlockRuleRow {
 }
 
 pub async fn connect(url: &str) -> Result<PgPool, sqlx::Error> {
-    PgPoolOptions::new().max_connections(5).connect(url).await
+    PgPoolOptions::new()
+        .max_connections(5)
+        .acquire_timeout(std::time::Duration::from_secs(10))
+        .connect(url).await
 }
 
 /// 首次运行建表（幂等）
@@ -227,11 +230,13 @@ pub async fn get_or_create_secret(pool: &PgPool) -> Result<String, sqlx::Error> 
         }
     }
     // 用 /dev/urandom + base64 生成随机串，取前 40 字符
-    let random_bytes = std::fs::read("/dev/urandom")
-        .map(|mut b| { b.truncate(32); b })
-        .unwrap_or_else(|_| vec![0u8; 32]);
-    let raw: Vec<u8> = random_bytes.into_iter().take(32).collect();
-    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&raw);
+    // 注意：/dev/urandom 是字符设备，必须用 read_exact 读取固定字节数
+    use std::io::Read;
+    let mut buf = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut buf))
+        .unwrap_or(());
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&buf);
     let secret: String = b64.chars().filter(|c| c.is_alphanumeric()).take(40).collect();
     set_setting(pool, "panel_secret", &Value::String(secret.clone())).await?;
     Ok(secret)

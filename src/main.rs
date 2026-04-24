@@ -849,7 +849,7 @@ fn run_nat_daemon(config_path: &str, interval: u64, reload: Arc<AtomicBool>) {
                     .enable_all()
                     .build()
                     .expect("无法创建 panel runtime");
-                rt.block_on(panel::run(pcfg, cp));
+                rt.block_on(panel::run(pcfg, cp, None));
             });
         }
     }
@@ -888,7 +888,7 @@ fn run_relay_daemon(config_path: &str, reload: Arc<AtomicBool>) {
 
     rt.block_on(async move {
         if let Some(pcfg) = panel_cfg {
-            tokio::spawn(panel::run(pcfg, config_path_owned.clone()));
+            tokio::spawn(panel::run(pcfg, config_path_owned.clone(), None));
         }
         proxy::run(&config_path_owned, reload).await;
     });
@@ -993,7 +993,8 @@ fn enable_ip_forwarding() {
 fn run_master_daemon(db_url: &str, listen: &str, interval: u64) {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    let rt = tokio::runtime::Builder::new_current_thread()
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
         .enable_all()
         .build()
         .expect("无法创建 runtime");
@@ -1052,16 +1053,9 @@ fn run_master_daemon(db_url: &str, listen: &str, interval: u64) {
             Err(e) => log::warn!("无法注册 SIGHUP: {}", e),
         }
 
-        // 面板在独立 OS 线程中运行，避免与 nat 循环互相阻塞
+        // 面板在同一 runtime 中以独立任务运行，共享 DB 连接池
         let db_url_panel = db_url.clone();
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .enable_all()
-                .build()
-                .expect("无法创建 panel runtime");
-            rt.block_on(panel::run(panel_cfg, db_url_panel));
-        });
+        tokio::spawn(panel::run(panel_cfg, db_url_panel, Some(pool.clone())));
 
         // 根据模式运行 NAT 或 relay daemon
         match mode {
@@ -1151,14 +1145,19 @@ async fn tick_from_db(
             }
 
             // TCP 健康检查（UDP-only 规则跳过）
+            // 使用 spawn_blocking 避免同步阻塞调用占用 async runtime
             if !matches!(rule.proto, config::Proto::Udp) {
                 let addr_str = if ip.contains(':') {
                     format!("[{}]:{}", ip, target.port_start)
                 } else {
                     format!("{}:{}", ip, target.port_start)
                 };
-                if let Ok(addr) = addr_str.parse() {
-                    if TcpStream::connect_timeout(&addr, HEALTH_TIMEOUT).is_err() {
+                if let Ok(addr) = addr_str.parse::<std::net::SocketAddr>() {
+                    let addr_check = addr;
+                    let health_ok = tokio::task::spawn_blocking(move || {
+                        TcpStream::connect_timeout(&addr_check, HEALTH_TIMEOUT).is_ok()
+                    }).await.unwrap_or(false);
+                    if !health_ok {
                         let label = rule.comment.as_deref().unwrap_or(to_str);
                         log::warn!("健康检查失败，暂时跳过目标「{}」({})", label, addr_str);
                         continue;
