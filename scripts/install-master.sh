@@ -63,8 +63,10 @@ fi
 # ── 下载二进制 ────────────────────────────────────────────────────
 BIN_URL="${GITHUB_PROXY}https://github.com/$REPO/releases/download/$VERSION/$ARTIFACT"
 echo "▶ 下载 $BIN_URL"
-curl -fsSL --connect-timeout 10 --max-time 120 "$BIN_URL" -o "$INSTALL_BIN"
-chmod +x "$INSTALL_BIN"
+TMP_BIN=$(mktemp)
+curl -fsSL --connect-timeout 10 --max-time 120 "$BIN_URL" -o "$TMP_BIN" || { rm -f "$TMP_BIN"; exit 1; }
+chmod +x "$TMP_BIN"
+mv "$TMP_BIN" "$INSTALL_BIN"
 ln -sf "$INSTALL_BIN" /usr/local/bin/rr
 
 # ── 安装 Docker（如未安装）────────────────────────────────────────
