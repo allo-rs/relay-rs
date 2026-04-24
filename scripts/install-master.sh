@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
-# relay-rs 主控（master）一键安装脚本
+# relay-rs 主控（master）安装 / 更新 / 卸载脚本
 #
 # 用法：
 #   curl -fsSL https://raw.githubusercontent.com/allo-rs/relay-rs/main/scripts/install-master.sh | bash
-#
-# 无需任何参数。PostgreSQL 通过 Docker Compose 自动部署于本机。
-# 如需自定义端口等，脚本会交互式询问。
 #
 # 可选环境变量：
 #   VERSION        指定版本号（默认拉 latest）
@@ -19,6 +16,7 @@ ENV_FILE="$CONFIG_DIR/env"
 COMPOSE_DIR="/opt/relay-rs"
 COMPOSE_FILE="$COMPOSE_DIR/docker-compose.yml"
 SERVICE_FILE="/etc/systemd/system/relay-rs-master.service"
+SERVICE_NAME="relay-rs-master"
 
 DB_NAME="relay"
 DB_USER="relay"
@@ -26,9 +24,82 @@ DB_USER="relay"
 # ── 权限检查 ──────────────────────────────────────────────────────
 [[ $EUID -ne 0 ]] && { echo "请以 root 运行"; exit 1; }
 
-# ── 交互式询问 ────────────────────────────────────────────────────
+# ── 检测是否已安装 ────────────────────────────────────────────────
+IS_INSTALLED=false
+[[ -f "$INSTALL_BIN" && -f "$ENV_FILE" ]] && IS_INSTALLED=true
+
+# ── 菜单 ─────────────────────────────────────────────────────────
+echo ""
+echo "╔══════════════════════════════════════════════════╗"
+echo "║            relay-rs 主控管理脚本                   ║"
+echo "╚══════════════════════════════════════════════════╝"
+echo ""
+
+if $IS_INSTALLED; then
+  CURRENT_VER=$("$INSTALL_BIN" --version 2>/dev/null | awk '{print $2}' || echo "未知")
+  echo "  当前版本：$CURRENT_VER"
+  echo ""
+  echo "  1. 更新二进制（保留数据和配置）"
+  echo "  2. 全新安装（清除现有数据）"
+  echo "  3. 卸载"
+  echo "  4. 退出"
+  echo ""
+  read -rp "请选择 [1-4]: " CHOICE
+  CHOICE="${CHOICE:-1}"
+else
+  echo "  1. 全新安装"
+  echo "  2. 退出"
+  echo ""
+  read -rp "请选择 [1-2]: " CHOICE
+  CHOICE="${CHOICE:-1}"
+  # 映射到统一动作
+  [[ "$CHOICE" == "2" ]] && exit 0
+  CHOICE="install"
+fi
+
+case "$CHOICE" in
+  1) $IS_INSTALLED && ACTION="update"   || ACTION="install" ;;
+  2) $IS_INSTALLED && ACTION="install"  || exit 0 ;;
+  3) $IS_INSTALLED && ACTION="uninstall"|| exit 0 ;;
+  4) exit 0 ;;
+  *) echo "无效选择"; exit 1 ;;
+esac
+
+# ── 卸载 ─────────────────────────────────────────────────────────
+if [[ "$ACTION" == "uninstall" ]]; then
+  read -rp "确认卸载？这将停止服务并删除所有数据 [y/N]: " _confirm
+  [[ "${_confirm,,}" != "y" ]] && { echo "已取消"; exit 0; }
+
+  systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
+  rm -f "$SERVICE_FILE"
+  systemctl daemon-reload
+
+  if [[ -f "$COMPOSE_FILE" ]]; then
+    docker compose -f "$COMPOSE_FILE" down -v 2>/dev/null || true
+  fi
+
+  rm -rf "$CONFIG_DIR" "$COMPOSE_DIR"
+  rm -f "$INSTALL_BIN" /usr/local/bin/rr
+
+  echo "✅ 卸载完成"
+  exit 0
+fi
+
+# ── 全新安装前确认（已有数据时警告）────────────────────────────
+if [[ "$ACTION" == "install" ]] && $IS_INSTALLED; then
+  read -rp "⚠️  全新安装将清除现有数据库和配置，确认继续？[y/N]: " _confirm
+  [[ "${_confirm,,}" != "y" ]] && { echo "已取消"; exit 0; }
+
+  systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+  if [[ -f "$COMPOSE_FILE" ]]; then
+    docker compose -f "$COMPOSE_FILE" down -v 2>/dev/null || true
+  fi
+  rm -f "$ENV_FILE" "$COMPOSE_FILE"
+fi
+
+# ── 询问面板端口（全新安装时）─────────────────────────────────
 PANEL_PORT=9090
-if [[ -t 0 ]]; then
+if [[ "$ACTION" == "install" ]]; then
   read -rp "面板监听端口 [9090]: " _port
   PANEL_PORT="${_port:-9090}"
 fi
@@ -62,12 +133,23 @@ fi
 
 # ── 下载二进制 ────────────────────────────────────────────────────
 BIN_URL="${GITHUB_PROXY}https://github.com/$REPO/releases/download/$VERSION/$ARTIFACT"
-echo "▶ 下载 $BIN_URL"
+echo "▶ 下载 relay-rs $VERSION..."
 TMP_BIN=$(mktemp)
 curl -fsSL --connect-timeout 10 --max-time 120 "$BIN_URL" -o "$TMP_BIN" || { rm -f "$TMP_BIN"; exit 1; }
 chmod +x "$TMP_BIN"
 mv "$TMP_BIN" "$INSTALL_BIN"
 ln -sf "$INSTALL_BIN" /usr/local/bin/rr
+
+# ── 仅更新时：重启服务后退出 ──────────────────────────────────
+if [[ "$ACTION" == "update" ]]; then
+  systemctl restart "$SERVICE_NAME"
+  echo ""
+  echo "✅ 更新完成（版本 $VERSION）"
+  echo "   systemctl status $SERVICE_NAME"
+  exit 0
+fi
+
+# ── 以下为全新安装流程 ────────────────────────────────────────────
 
 # ── 安装 Docker（如未安装）────────────────────────────────────────
 if ! command -v docker &>/dev/null; then
@@ -82,14 +164,7 @@ DB_URL="postgresql://${DB_USER}:${DB_PASS}@127.0.0.1:5432/${DB_NAME}?sslmode=dis
 
 # ── 写 docker-compose.yml ─────────────────────────────────────────
 mkdir -p "$COMPOSE_DIR"
-if [[ -f "$COMPOSE_FILE" ]]; then
-  echo "⚠️  docker-compose.yml 已存在：$COMPOSE_FILE（跳过写入）"
-  # 从已有 env 文件读取原有连接串（升级场景）
-  if [[ -f "$ENV_FILE" ]]; then
-    DB_URL=$(grep '^DATABASE_URL=' "$ENV_FILE" | cut -d= -f2- || true)
-  fi
-else
-  cat > "$COMPOSE_FILE" <<YAML
+cat > "$COMPOSE_FILE" <<YAML
 services:
   postgres:
     image: postgres:16-alpine
@@ -105,7 +180,6 @@ services:
 volumes:
   pgdata:
 YAML
-fi
 
 # ── 启动 PostgreSQL ───────────────────────────────────────────────
 echo "▶ 启动 PostgreSQL..."
@@ -119,7 +193,7 @@ for i in $(seq 1 30); do
   fi
   sleep 1
   if [[ $i -eq 30 ]]; then
-    echo "PostgreSQL 启动超时，请检查 Docker 日志：docker compose -f $COMPOSE_FILE logs"
+    echo "PostgreSQL 启动超时，请检查：docker compose -f $COMPOSE_FILE logs"
     exit 1
   fi
 done
@@ -127,16 +201,12 @@ echo "▶ PostgreSQL 就绪"
 
 # ── 写 env 文件 ───────────────────────────────────────────────────
 mkdir -p "$CONFIG_DIR"
-if [[ -f "$ENV_FILE" ]]; then
-  echo "⚠️  环境文件已存在：$ENV_FILE（跳过写入，仅更新二进制）"
-else
-  cat > "$ENV_FILE" <<ENV
+cat > "$ENV_FILE" <<ENV
 DATABASE_URL=${DB_URL}
 PANEL_LISTEN=0.0.0.0:${PANEL_PORT}
 ENV
-  chmod 600 "$ENV_FILE"
-  echo "▶ 已写入 $ENV_FILE"
-fi
+chmod 600 "$ENV_FILE"
+echo "▶ 已写入 $ENV_FILE"
 
 # ── systemd 服务 ──────────────────────────────────────────────────
 cat > "$SERVICE_FILE" <<UNIT
@@ -157,7 +227,7 @@ WantedBy=multi-user.target
 UNIT
 
 systemctl daemon-reload
-systemctl enable --now relay-rs-master
+systemctl enable --now "$SERVICE_NAME"
 
 echo ""
 echo "✅ 主控安装完成（版本 $VERSION）"
@@ -171,11 +241,11 @@ echo "  bash <(curl -fsSL https://raw.githubusercontent.com/allo-rs/relay-rs/mai
 echo "    --port 19090 --pubkey-b64 <主控公钥的 base64>"
 echo ""
 echo "常用命令："
-echo "  systemctl status relay-rs-master   查看服务状态"
+echo "  systemctl status $SERVICE_NAME    查看服务状态"
 echo "  rr list                           查看转发规则"
 echo "  rr add                            添加转发规则"
 echo "  rr panel-reset-auth               清除 Discourse 配置（锁死救援）"
-echo "  journalctl -u relay-rs-master -f  实时日志"
+echo "  journalctl -u $SERVICE_NAME -f    实时日志"
 echo ""
 echo "数据库（PostgreSQL）："
 echo "  docker compose -f $COMPOSE_FILE ps"
