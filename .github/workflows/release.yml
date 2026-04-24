@@ -14,13 +14,15 @@ env:
 jobs:
   build:
     name: Build ${{ matrix.target }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
             artifact: relay-rs-x86_64-unknown-linux-musl
           - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
             artifact: relay-rs-aarch64-unknown-linux-musl
 
     steps:
@@ -35,6 +37,9 @@ jobs:
         working-directory: panel
         run: bun install --frozen-lockfile && bun run build
 
+      - name: 安装 musl 工具链
+        run: sudo apt-get install -y musl-tools
+
       - name: 安装 Rust 工具链
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -45,19 +50,8 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: 安装 Zig（用于 musl 交叉编译）
-        uses: goto-bus-stop/setup-zig@v2
-        with:
-          version: 0.13.0
-
-      - name: 安装 cargo-zigbuild（预编译二进制）
-        uses: cargo-bins/cargo-binstall@main
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - run: cargo binstall cargo-zigbuild --no-confirm --quiet
-
       - name: 编译
-        run: cargo zigbuild --release --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: 重命名产物
         run: cp target/${{ matrix.target }}/release/relay-rs ${{ matrix.artifact }}
