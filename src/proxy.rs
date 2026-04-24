@@ -296,7 +296,7 @@ async fn listen_udp_rule(rule: ForwardRule, port: u16, port_offset: u16, dns_cac
         // 查找或创建 per-client 的出站 UdpSocket
         let target_sock: Arc<UdpSocket> = {
             // 快路径：读锁命中（绝大多数情况）
-            if let Some(s) = sessions.read().unwrap().get(&client_addr).cloned() {
+            if let Some(s) = sessions.read().unwrap_or_else(|e| e.into_inner()).get(&client_addr).cloned() {
                 s
             } else {
                 // 慢路径：创建新 socket，await 期间不持有任何锁
@@ -310,7 +310,7 @@ async fn listen_udp_rule(rule: ForwardRule, port: u16, port_offset: u16, dns_cac
                 }
                 let sock = Arc::new(sock);
                 // 写锁内再次检查（TOCTOU 防护）：await 期间可能已有其他任务插入同一 client
-                let mut map = sessions.write().unwrap();
+                let mut map = sessions.write().unwrap_or_else(|e| e.into_inner());
                 if let Some(existing) = map.get(&client_addr).cloned() {
                     existing // 复用已有 session，丢弃刚创建的 sock
                 } else {
@@ -341,7 +341,7 @@ async fn listen_udp_rule(rule: ForwardRule, port: u16, port_offset: u16, dns_cac
                                 }
                             }
                         }
-                        sessions_gc.write().unwrap().remove(&client_addr);
+                        sessions_gc.write().unwrap_or_else(|e| e.into_inner()).remove(&client_addr);
                     });
 
                     sock

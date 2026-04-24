@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::sleep;
 use std::time::Duration;
 
-fn service_name() -> &'static str {
+pub fn service_name() -> &'static str {
     if std::env::var("DATABASE_URL").is_ok() { "relay-rs-master" } else { "relay-rs" }
 }
 const CONFIG_PATH: &str = "/etc/relay-rs/relay.toml";

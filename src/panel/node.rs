@@ -9,12 +9,15 @@ use axum::{
 use serde_json::{json, Value};
 use tower_http::cors::CorsLayer;
 
+use std::sync::Arc;
+
 use crate::config;
 
 /// node 模式共享状态
 #[derive(Clone)]
 struct NodeState {
     config_path: String,
+    write_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Ed25519 JWT 认证中间件（验证主控签发的短效 token）
@@ -43,7 +46,7 @@ async fn auth_middleware(
 
 /// 构建 node 模式路由
 pub fn router(master_pubkey: String, config_path: String) -> Router {
-    let state = NodeState { config_path };
+    let state = NodeState { config_path, write_lock: Arc::new(tokio::sync::Mutex::new(())) };
 
     let api = Router::new()
         .route("/api/status", get(handle_status))
@@ -94,6 +97,7 @@ async fn handle_put_rules(
     State(state): State<NodeState>,
     Json(body): Json<Value>,
 ) -> Response {
+    let _guard = state.write_lock.lock().await;
     let mut cfg = match config::load(&state.config_path) {
         Ok(c) => c,
         Err(e) => {
@@ -149,6 +153,7 @@ async fn handle_add_forward(
     State(state): State<NodeState>,
     Json(rule): Json<config::ForwardRule>,
 ) -> Response {
+    let _guard = state.write_lock.lock().await;
     let mut cfg = match config::load(&state.config_path) {
         Ok(c) => c,
         Err(e) => {
@@ -180,6 +185,7 @@ async fn handle_del_forward(
     State(state): State<NodeState>,
     Path(idx): Path<usize>,
 ) -> Response {
+    let _guard = state.write_lock.lock().await;
     let mut cfg = match config::load(&state.config_path) {
         Ok(c) => c,
         Err(e) => {
@@ -219,6 +225,7 @@ async fn handle_add_block(
     State(state): State<NodeState>,
     Json(rule): Json<config::BlockRule>,
 ) -> Response {
+    let _guard = state.write_lock.lock().await;
     let mut cfg = match config::load(&state.config_path) {
         Ok(c) => c,
         Err(e) => {
@@ -250,6 +257,7 @@ async fn handle_del_block(
     State(state): State<NodeState>,
     Path(idx): Path<usize>,
 ) -> Response {
+    let _guard = state.write_lock.lock().await;
     let mut cfg = match config::load(&state.config_path) {
         Ok(c) => c,
         Err(e) => {
@@ -304,6 +312,6 @@ async fn handle_reload() -> impl IntoResponse {
 /// 向 relay-rs systemd 服务发送 SIGHUP 触发热重载
 fn trigger_reload() {
     let _ = std::process::Command::new("systemctl")
-        .args(["kill", "-s", "SIGHUP", "relay-rs"])
+        .args(["kill", "-s", "SIGHUP", crate::service_name()])
         .status();
 }

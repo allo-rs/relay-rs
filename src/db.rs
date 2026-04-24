@@ -148,7 +148,7 @@ pub async fn list_forward_rules(pool: &PgPool) -> Result<Vec<ForwardRuleRow>, sq
 }
 
 pub async fn add_forward_rule(pool: &PgPool, rule: &ForwardRule) -> Result<i32, sqlx::Error> {
-    let val = serde_json::to_value(rule).expect("序列化 ForwardRule 失败");
+    let val = serde_json::to_value(rule).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
     let row = sqlx::query("INSERT INTO forward_rules (rule) VALUES ($1) RETURNING id")
         .bind(val)
         .fetch_one(pool)
@@ -157,7 +157,7 @@ pub async fn add_forward_rule(pool: &PgPool, rule: &ForwardRule) -> Result<i32, 
 }
 
 pub async fn update_forward_rule(pool: &PgPool, id: i32, rule: &ForwardRule) -> Result<(), sqlx::Error> {
-    let val = serde_json::to_value(rule).expect("序列化 ForwardRule 失败");
+    let val = serde_json::to_value(rule).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
     sqlx::query("UPDATE forward_rules SET rule = $1 WHERE id = $2")
         .bind(val)
         .bind(id)
@@ -193,7 +193,7 @@ pub async fn list_block_rules(pool: &PgPool) -> Result<Vec<BlockRuleRow>, sqlx::
 }
 
 pub async fn add_block_rule(pool: &PgPool, rule: &BlockRule) -> Result<i32, sqlx::Error> {
-    let val = serde_json::to_value(rule).expect("序列化 BlockRule 失败");
+    let val = serde_json::to_value(rule).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
     let row = sqlx::query("INSERT INTO block_rules (rule) VALUES ($1) RETURNING id")
         .bind(val)
         .fetch_one(pool)
@@ -202,7 +202,7 @@ pub async fn add_block_rule(pool: &PgPool, rule: &BlockRule) -> Result<i32, sqlx
 }
 
 pub async fn update_block_rule(pool: &PgPool, id: i32, rule: &BlockRule) -> Result<(), sqlx::Error> {
-    let val = serde_json::to_value(rule).expect("序列化 BlockRule 失败");
+    let val = serde_json::to_value(rule).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
     sqlx::query("UPDATE block_rules SET rule = $1 WHERE id = $2")
         .bind(val)
         .bind(id)
@@ -264,6 +264,6 @@ pub async fn get_forward_mode(pool: &PgPool) -> Result<ForwardMode, sqlx::Error>
 
 /// 写入转发模式
 pub async fn set_forward_mode(pool: &PgPool, mode: &ForwardMode) -> Result<(), sqlx::Error> {
-    let val = serde_json::to_value(mode).expect("序列化 ForwardMode 失败");
+    let val = serde_json::to_value(mode).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
     set_setting(pool, "forward_mode", &val).await
 }

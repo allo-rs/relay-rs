@@ -231,7 +231,10 @@ pub fn load(path: &str) -> Result<Config, Box<dyn std::error::Error>> {
 pub fn save(config: &Config, path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let content = toml::to_string_pretty(config)
         .map_err(|e| format!("序列化配置失败: {}", e))?;
-    fs::write(path, content)
-        .map_err(|e| format!("写入配置文件 {} 失败: {}", path, e))?;
+    let tmp_path = format!("{}.tmp", path);
+    fs::write(&tmp_path, &content)
+        .map_err(|e| format!("写入临时配置文件 {} 失败: {}", tmp_path, e))?;
+    fs::rename(&tmp_path, path)
+        .map_err(|e| format!("原子替换配置文件 {} 失败: {}", path, e))?;
     Ok(())
 }
