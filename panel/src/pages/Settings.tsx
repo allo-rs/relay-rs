@@ -1,16 +1,13 @@
 import {
-  ShieldCheck, LogOut, Loader2, UserCircle, KeyRound,
-  MessageSquare, Save, Trash2, Copy, Check, Server,
+  ShieldCheck, LogOut, Loader2, UserCircle,
+  MessageSquare, Save, Trash2,
 } from "lucide-react";
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
 import PageShell from "@/components/PageShell";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Skeleton } from "@/components/ui/skeleton";
 import { useCurrentUser } from "@/lib/CurrentUser";
 import {
   logout as apiLogout,
@@ -18,7 +15,6 @@ import {
   putDiscourseSetting,
   deleteDiscourseSetting,
 } from "@/lib/auth";
-import { getMasterPubkey } from "@/lib/api";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 
@@ -38,7 +34,7 @@ export default function Settings() {
   }
 
   return (
-    <PageShell title="设置" subtitle="当前登录身份、主控密钥与节点接入">
+    <PageShell title="设置" subtitle="当前登录身份与 Discourse SSO 配置">
       <div className="grid gap-4 lg:grid-cols-2">
         <Card>
           <CardHeader>
@@ -112,157 +108,8 @@ export default function Settings() {
         </Card>
 
         <DiscourseSettingCard onChanged={refresh} />
-
-        <MasterPubkeyCard />
-        <NodeEnrollCard />
       </div>
     </PageShell>
-  );
-}
-
-// ── Master Pubkey Card ─────────────────────────────────────────────
-
-function useCopy(timeout = 2000) {
-  const [copied, setCopied] = useState(false);
-  function copy(text: string) {
-    navigator.clipboard.writeText(text).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), timeout);
-    });
-  }
-  return { copied, copy };
-}
-
-function MasterPubkeyCard() {
-  const { data, isLoading, error } = useQuery({
-    queryKey: ["master-pubkey"],
-    queryFn: getMasterPubkey,
-    staleTime: Infinity,
-  });
-
-  const { copied: copiedPem, copy: copyPem } = useCopy();
-  const { copied: copiedB64, copy: copyB64 } = useCopy();
-
-  const pem = data?.pubkey ?? "";
-  const b64 = pem ? btoa(pem) : "";
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-sm flex items-center gap-2">
-          <KeyRound className="h-4 w-4" />
-          主控 Ed25519 公钥
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        {isLoading && (
-          <div className="space-y-2">
-            <Skeleton className="h-4 w-full" />
-            <Skeleton className="h-4 w-3/4" />
-            <Skeleton className="h-4 w-4/5" />
-          </div>
-        )}
-        {error && (
-          <p className="text-sm text-destructive">
-            加载失败：{error instanceof Error ? error.message : "未知错误"}
-          </p>
-        )}
-        {pem && (
-          <>
-            <pre className="rounded-md bg-muted px-3 py-2.5 text-[11px] font-mono leading-relaxed overflow-x-auto whitespace-pre-wrap break-all select-all">
-              {pem}
-            </pre>
-            <div className="flex flex-wrap gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                className="gap-1.5"
-                onClick={() => copyPem(pem)}
-              >
-                {copiedPem ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
-                {copiedPem ? "已复制 PEM" : "复制 PEM"}
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                className="gap-1.5"
-                onClick={() => copyB64(b64)}
-              >
-                {copiedB64 ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
-                {copiedB64 ? "已复制 Base64" : "复制 Base64"}
-              </Button>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              安装脚本使用 Base64 格式（<code>--pubkey-b64</code>）。
-            </p>
-          </>
-        )}
-      </CardContent>
-    </Card>
-  );
-}
-
-// ── Node Enrollment Card ───────────────────────────────────────────
-
-function NodeEnrollCard() {
-  const { data, isLoading } = useQuery({
-    queryKey: ["master-pubkey"],
-    queryFn: getMasterPubkey,
-    staleTime: Infinity,
-  });
-
-  const b64 = data?.pubkey ? btoa(data.pubkey) : "";
-  const { copied, copy } = useCopy();
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-sm flex items-center gap-2">
-          <Server className="h-4 w-4" />
-          节点接入
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-3 text-sm">
-        <ol className="space-y-1.5 text-muted-foreground text-xs leading-relaxed list-decimal list-inside">
-          <li>前往「节点」页面，点击「添加节点」录入节点名称和 URL。</li>
-          <li>进入节点详情页，点击「安装命令」获取完整安装脚本。</li>
-          <li>在节点服务器以 <code>root</code> 执行安装脚本，完成后节点上线。</li>
-        </ol>
-
-        <div className="space-y-1.5">
-          <p className="text-xs text-muted-foreground">
-            公钥 Base64（安装脚本 <code>--pubkey-b64</code> 参数）：
-          </p>
-          {isLoading ? (
-            <Skeleton className="h-8" />
-          ) : b64 ? (
-            <div className="flex gap-2">
-              <code className="flex-1 min-w-0 rounded-md bg-muted px-2 py-1.5 text-[11px] font-mono truncate select-all">
-                {b64}
-              </code>
-              <Button
-                variant="outline"
-                size="sm"
-                className="shrink-0 gap-1.5"
-                onClick={() => copy(b64)}
-              >
-                {copied ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
-                {copied ? "已复制" : "复制"}
-              </Button>
-            </div>
-          ) : (
-            <p className="text-xs text-muted-foreground">加载失败</p>
-          )}
-        </div>
-
-        <Button asChild size="sm" variant="outline" className="w-full gap-1.5 mt-1">
-          <Link to="/nodes">
-            <Server className="h-3.5 w-3.5" />
-            前往节点管理
-          </Link>
-        </Button>
-      </CardContent>
-    </Card>
   );
 }
 
