@@ -12,8 +12,34 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  test:
+    name: Run tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+
+  frontend:
+    name: Build frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Build
+        working-directory: panel
+        run: bun install --frozen-lockfile && bun run build
+      - uses: actions/upload-artifact@v6
+        with:
+          name: panel-dist
+          path: panel/dist
+
   build:
     name: Build ${{ matrix.target }}
+    needs: [test, frontend]
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -26,28 +52,19 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Bun
-        uses: oven-sh/setup-bun@v2
+      - uses: actions/download-artifact@v6
         with:
-          bun-version: latest
-
-      - name: Build frontend
-        working-directory: panel
-        run: bun install --frozen-lockfile && bun run build
-
-      - name: Run tests
-        run: cargo test --workspace
+          name: panel-dist
+          path: panel/dist
 
       - name: Install musl tools
         run: sudo apt-get install -y musl-tools
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - name: Cache Cargo deps
-        uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
 
@@ -61,8 +78,7 @@ jobs:
           cp target/${{ matrix.target }}/release/relay-master relay-master-${{ matrix.target }}
           cp target/${{ matrix.target }}/release/relay-node   relay-node-${{ matrix.target }}
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v6
         with:
           name: binaries-${{ matrix.target }}
           path: |
@@ -77,14 +93,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Download all artifacts
-        uses: actions/download-artifact@v6
+      - uses: actions/download-artifact@v6
         with:
           path: artifacts
           merge-multiple: true
 
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2
         with:
           files: artifacts/*
           generate_release_notes: true
