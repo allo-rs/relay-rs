@@ -48,29 +48,46 @@ IS_INSTALLED=false
 if [[ -z "$ACTION" && -z "$MASTER" ]]; then
   echo ""
   echo "╔══════════════════════════════════════════════════╗"
-  echo "║           relay-node installer                    ║"
+  echo "║          relay-node 安装管理                      ║"
   echo "╚══════════════════════════════════════════════════╝"
   echo ""
   if $IS_INSTALLED; then
-    echo "  node_id: $(cat "$STATE_DIR/node_id" 2>/dev/null || echo unknown)"
+    NID=$(cat "$STATE_DIR/node_id" 2>/dev/null || echo unknown)
+    STATUS_LINE=$(systemctl is-active "$SERVICE_NAME" 2>/dev/null || echo "inactive")
+    echo "  当前状态: ✅ 已安装  node_id=$NID  systemd=$STATUS_LINE"
     echo ""
-    echo "  1. Update binary (keep cert + state)"
-    echo "  2. Re-register (clears cert, runs enrollment again)"
-    echo "  3. Uninstall"
-    echo "  4. Quit"
-    read -rp "Choice [1-4]: " CHOICE
-    case "${CHOICE:-1}" in
+    echo "请选择操作:"
+    echo "  1. 更新二进制                  (保留证书 + 状态)"
+    echo "  2. 重新注册                    (清证书重新走 enrollment)"
+    echo "  3. 查看服务状态"
+    echo "  4. 卸载"
+    echo "  0. 退出"
+    read -rp "请选择 [0-4]: " CHOICE
+    case "${CHOICE:-0}" in
       1) ACTION="update" ;;
       2) ACTION="reregister" ;;
-      3) ACTION="uninstall" ;;
-      4) exit 0 ;;
-      *) echo "Invalid choice"; exit 1 ;;
+      3) ACTION="status" ;;
+      4) ACTION="uninstall" ;;
+      0) exit 0 ;;
+      *) echo "无效选项"; exit 1 ;;
     esac
   else
-    echo "No relay-node installation detected. Run with arguments:"
+    echo "  当前状态: 未安装"
+    echo ""
+    echo "首次安装需要以下信息（在 master 上 'relay-master node-add' 获取）："
     echo "  $0 --master <grpc-addr> --ca-b64 <base64> --enrollment-token <t> --node-name <name>"
     exit 1
   fi
+fi
+
+if [[ "$ACTION" == "status" ]]; then
+  NID=$(cat "$STATE_DIR/node_id" 2>/dev/null || echo unknown)
+  echo ""
+  echo "node_id:   $NID"
+  echo "状态:      $(systemctl is-active "$SERVICE_NAME")"
+  echo ""
+  systemctl status "$SERVICE_NAME" --no-pager -n 5 2>/dev/null || true
+  exit 0
 fi
 
 if [[ "$ACTION" == "uninstall" ]]; then

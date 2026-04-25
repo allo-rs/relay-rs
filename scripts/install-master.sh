@@ -39,31 +39,50 @@ IS_INSTALLED=false
 
 echo ""
 echo "╔══════════════════════════════════════════════════╗"
-echo "║          relay-master installer                  ║"
+echo "║          relay-master 安装管理                    ║"
 echo "╚══════════════════════════════════════════════════╝"
 echo ""
 
 if $IS_INSTALLED; then
   CURRENT_VER=$("$INSTALL_BIN" --version 2>/dev/null | awk '{print $2}' || echo "unknown")
-  echo "  Currently installed version: $CURRENT_VER"
-  echo ""
-  echo "  1. Update binary (keep CA, env, database)"
-  echo "  2. Regenerate gRPC server cert (after SAN change; CA preserved)"
-  echo "  3. Export CA bundle (for node enrollment)"
-  echo "  4. Uninstall"
-  echo "  5. Quit"
-  echo ""
-  read -rp "Choice [1-5]: " CHOICE
-  case "${CHOICE:-1}" in
-    1) ACTION="update" ;;
-    2) ACTION="regen-server-cert" ;;
-    3) ACTION="show-ca" ;;
-    4) ACTION="uninstall" ;;
-    5) exit 0 ;;
-    *) echo "Invalid choice"; exit 1 ;;
-  esac
+  STATUS_LINE=$(systemctl is-active "$SERVICE_NAME" 2>/dev/null || echo "inactive")
+  echo "  当前状态: ✅ 已安装 (v$CURRENT_VER, systemd=$STATUS_LINE)"
 else
-  ACTION="install"
+  echo "  当前状态: 未安装"
+fi
+echo ""
+echo "请选择操作:"
+echo "  1. 全新安装 / 重装          (覆盖二进制 + 配置 + 重置 CA)"
+echo "  2. 更新版本                 (只换二进制，保留 CA / 数据库 / 配置)"
+echo "  3. 重新签发 gRPC server 证书"
+echo "  4. 导出 CA bundle           (用于 node 加入)"
+echo "  5. 查看面板地址 / 服务状态"
+echo "  6. 卸载"
+echo "  0. 退出"
+echo ""
+read -rp "请选择 [0-6]: " CHOICE
+case "${CHOICE:-0}" in
+  1) ACTION="install" ;;
+  2) $IS_INSTALLED || { echo "❌ 还没安装，先选 1"; exit 1; }; ACTION="update" ;;
+  3) $IS_INSTALLED || { echo "❌ 还没安装"; exit 1; }; ACTION="regen-server-cert" ;;
+  4) $IS_INSTALLED || { echo "❌ 还没安装"; exit 1; }; ACTION="show-ca" ;;
+  5) $IS_INSTALLED || { echo "❌ 还没安装"; exit 1; }; ACTION="status" ;;
+  6) $IS_INSTALLED || { echo "❌ 还没安装"; exit 0; }; ACTION="uninstall" ;;
+  0) exit 0 ;;
+  *) echo "无效选项"; exit 1 ;;
+esac
+
+# Confirm reinstall on top of an existing install
+if $IS_INSTALLED && [[ "$ACTION" == "install" ]]; then
+  echo ""
+  echo "⚠️  检测到已安装，重装会:"
+  echo "   • 覆盖二进制 + env 文件"
+  echo "   • 重置 CA（旧 node 证书将作废，需要重新加入）"
+  echo "   • 数据库不动"
+  read -rp "继续？[y/N]: " _c
+  [[ "${_c,,}" != "y" ]] && { echo "已取消"; exit 0; }
+  systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+  rm -rf "$CA_DIR"
 fi
 
 # ── Architecture / version / proxy ───────────────────────────────
@@ -101,6 +120,21 @@ download_bin() {
     || { rm -f "$tmp"; echo "Download failed: $url"; exit 1; }
   chmod +x "$tmp"; mv "$tmp" "$dest"
 }
+
+# ── status ───────────────────────────────────────────────────────
+if [[ "$ACTION" == "status" ]]; then
+  set -a; source "$ENV_FILE"; set +a
+  PUB_IP=$(curl -fsSL --connect-timeout 5 https://api.ipify.org 2>/dev/null || echo "<this-host>")
+  PORT_PANEL="${RELAY_PANEL_LISTEN##*:}"
+  PORT_GRPC="${RELAY_MASTER_LISTEN##*:}"
+  echo ""
+  echo "面板地址:    http://$PUB_IP:${PORT_PANEL:-9090}"
+  echo "gRPC 端点:   $PUB_IP:${PORT_GRPC:-9443}"
+  echo "服务状态:    $(systemctl is-active "$SERVICE_NAME")"
+  echo ""
+  systemctl status "$SERVICE_NAME" --no-pager -n 5 2>/dev/null || true
+  exit 0
+fi
 
 # ── show-ca ──────────────────────────────────────────────────────
 if [[ "$ACTION" == "show-ca" ]]; then
