@@ -5,13 +5,11 @@
 //! 认证模型：
 //! - 公共：`/api/auth/discourse/login`、`/api/auth/discourse/callback`
 //! - 用户：`/api/auth/me`、`/api/auth/logout`（自身校验）
-//! - `/api/v1/*` 与 `/api/v1/settings/*` 都强制 admin（先要求 user JWT，再要求 `claims.admin`）
+//! - 其余 `/api/*`（含 `/api/settings/*`）都强制 admin（先要求 user JWT，再要求 `claims.admin`）
 //!
-//! 与 v0 panel 关键差异：
-//! - 端口由 `RELAY_PANEL_LISTEN` 控制（默认 `0.0.0.0:9090`），与 v0 同名但生命周期独立。
-//! - 配置统一存到 v1 专属表 `v1_settings`，不复用 v0 `settings`。
-//! - 不内置 TLS（建议外置 nginx/cloudflare 终结）；Cookie `Secure` 由
-//!   `RELAY_PANEL_EXTERNAL_URL` 是否 https 决定。
+//! 端口由 `RELAY_PANEL_LISTEN` 控制（默认 `0.0.0.0:9090`）。
+//! 不内置 TLS（建议外置 nginx/cloudflare 终结）；Cookie `Secure` 由
+//! `RELAY_PANEL_EXTERNAL_URL` 是否 https 决定。
 
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
@@ -98,7 +96,7 @@ impl AppState {
                     *g = None;
                 }
             }
-            Err(e) => log::warn!("读取 v1_settings.discourse 失败: {}", e),
+            Err(e) => log::warn!("读取 settings.discourse 失败: {}", e),
         }
     }
 
@@ -166,7 +164,7 @@ pub async fn run(
                     first = false;
                     if s.discourse().is_none() {
                         log::warn!(
-                            "[安全] Discourse 未配置，受保护 API 仍要求登录，请尽快通过 PUT /api/v1/settings/discourse 完成配置"
+                            "[安全] Discourse 未配置，受保护 API 仍要求登录，请尽快通过 PUT /api/settings/discourse 完成配置"
                         );
                     }
                 }
@@ -197,16 +195,16 @@ fn router(state: Arc<AppState>) -> Router {
         .with_state(state.clone());
 
     let admin_api = Router::new()
-        .route("/api/v1/nodes", get(handle_list_nodes))
-        .route("/api/v1/nodes/:id", delete(handle_delete_node))
+        .route("/api/nodes", get(handle_list_nodes))
+        .route("/api/nodes/:id", delete(handle_delete_node))
         .route(
-            "/api/v1/segments",
+            "/api/segments",
             get(handle_list_segments).post(handle_add_segment),
         )
-        .route("/api/v1/segments/:id", delete(handle_delete_segment))
-        .route("/api/v1/enrollment-tokens", post(handle_create_enrollment))
+        .route("/api/segments/:id", delete(handle_delete_segment))
+        .route("/api/enrollment-tokens", post(handle_create_enrollment))
         .route(
-            "/api/v1/settings/discourse",
+            "/api/settings/discourse",
             get(handle_get_discourse_setting)
                 .put(handle_put_discourse_setting)
                 .delete(handle_delete_discourse_setting),
@@ -475,7 +473,7 @@ async fn handle_logout(State(state): State<Arc<AppState>>) -> Response {
     resp
 }
 
-// ── /api/v1/nodes ─────────────────────────────────────────────────
+// ── /api/nodes ────────────────────────────────────────────────────
 
 async fn handle_list_nodes(State(state): State<Arc<AppState>>) -> Response {
     match admin::node_list_rows(&state.db).await {
@@ -499,7 +497,7 @@ async fn handle_delete_node(
     }
 }
 
-// ── /api/v1/segments ──────────────────────────────────────────────
+// ── /api/segments ─────────────────────────────────────────────────
 
 #[derive(Deserialize)]
 struct SegListQuery {
@@ -575,7 +573,7 @@ async fn handle_delete_segment(
     }
 }
 
-// ── /api/v1/enrollment-tokens ─────────────────────────────────────
+// ── /api/enrollment-tokens ────────────────────────────────────────
 
 #[derive(Deserialize)]
 struct EnrollBody {
@@ -658,7 +656,7 @@ async fn handle_create_enrollment(
     .into_response()
 }
 
-// ── /api/v1/settings/discourse ────────────────────────────────────
+// ── /api/settings/discourse ───────────────────────────────────────
 
 async fn handle_get_discourse_setting(State(state): State<Arc<AppState>>) -> Response {
     let d = state.discourse();

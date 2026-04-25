@@ -1,5 +1,5 @@
-//! master 的 v1 DB 访问层。
-//! 所有 v1_* 表的封装；迁移通过 `sqlx::migrate!` 嵌入到二进制。
+//! master 的 DB 访问层（schema 表名见 `migrations/`）。
+//! 迁移通过 `sqlx::migrate!` 嵌入到二进制。
 
 use anyhow::{Context, Result};
 use sqlx::postgres::{PgPool, PgPoolOptions};
@@ -18,8 +18,8 @@ pub async fn connect(url: &str) -> Result<PgPool> {
 }
 
 pub async fn migrate(pool: &PgPool) -> Result<()> {
-    MIGRATOR.run(pool).await.context("运行 v1 迁移失败")?;
-    log::info!("v1 schema 迁移完成");
+    MIGRATOR.run(pool).await.context("运行 schema 迁移失败")?;
+    log::info!("schema 迁移完成");
     Ok(())
 }
 

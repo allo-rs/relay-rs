@@ -1,4 +1,4 @@
-//! v1_settings KV 表的辅助函数。
+//! `v1_settings` KV 表的辅助函数（表名保留历史前缀，避免 v2.x 在线迁移）。
 //!
 //! 当前只用于 discourse SSO 配置，但表本身是通用的（key, value JSONB）。
 

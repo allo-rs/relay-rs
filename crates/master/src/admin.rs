@@ -1,4 +1,4 @@
-//! 运维用 CLI 子命令：segment / node 的增删查，直接读写 v1 DB。
+//! 运维用 CLI 子命令：segment / node 的增删查，直接读写 DB。
 //!
 //! 这些命令**不走 gRPC**，直接连 DATABASE_URL：
 //!   - 允许 master daemon 不在时也能做数据维护

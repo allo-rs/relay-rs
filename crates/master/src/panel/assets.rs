@@ -23,7 +23,7 @@ code{background:#1c1f26;padding:2px 6px;border-radius:4px}</style></head>
 <body><h1>relay-master panel — frontend not built</h1>
 <p>构建产物 <code>panel/dist/</code> 未嵌入。请在 build 前运行：</p>
 <pre><code>cd panel &amp;&amp; bun install &amp;&amp; bun run build</code></pre>
-<p>API 路径仍正常工作，例如 <code>GET /api/v1/nodes</code>。</p>
+<p>API 路径仍正常工作，例如 <code>GET /api/nodes</code>。</p>
 </body></html>"#;
 
 /// 是否存在嵌入产物（非空 dist）。
@@ -39,7 +39,7 @@ fn placeholder_response() -> Response<Body> {
 }
 
 /// SPA 静态资源处理：路径含 `.` 视为静态文件，缺失时 404；其他视为前端路由，
-/// 回落到 `index.html`。整体策略与 v0 `src/panel/assets.rs` 一致。
+/// 回落到 `index.html`。
 pub async fn serve_asset(uri: Uri) -> impl IntoResponse {
     if !has_assets() {
         return placeholder_response();
