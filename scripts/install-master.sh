@@ -73,29 +73,27 @@ case "${CHOICE:-0}" in
 esac
 
 # Detect & offer to disable old v0 single-binary services that occupy
-# panel/grpc ports and confuse the operator. v0 shipped two unit names
-# (relay-rs.service early, then relay-rs-master.service + relay-rs-node.service later).
-if [[ "$ACTION" == "install" ]]; then
-  V0_UNITS=()
-  for u in relay-rs.service relay-rs-master.service relay-rs-node.service; do
-    if systemctl list-unit-files "$u" 2>/dev/null | grep -q "^$u"; then
-      V0_UNITS+=("$u")
-    fi
-  done
-  if (( ${#V0_UNITS[@]} > 0 )); then
-    echo ""
-    echo "⚠️  检测到旧版 v0 服务仍在系统里（与 v2 不兼容，会占用 9090/19090 等端口）："
-    printf '     • %s\n' "${V0_UNITS[@]}"
-    read -rp "   停止并禁用？[Y/n]: " _v0
-    if [[ "${_v0,,}" != "n" ]]; then
-      for u in "${V0_UNITS[@]}"; do
-        systemctl disable --now "$u" 2>/dev/null || true
-        rm -f "/etc/systemd/system/$u"
-      done
-      rm -f /usr/local/bin/relay-rs
-      systemctl daemon-reload
-      echo "   ✅ 旧 v0 已清理"
-    fi
+# panel/grpc ports and confuse the operator. Run on every action (not
+# just install) so the warning surfaces even at menu level.
+V0_UNITS=()
+for u in relay-rs.service relay-rs-master.service relay-rs-node.service; do
+  if systemctl list-unit-files "$u" 2>/dev/null | grep -q "^$u"; then
+    V0_UNITS+=("$u")
+  fi
+done
+if (( ${#V0_UNITS[@]} > 0 )); then
+  echo ""
+  echo "⚠️  检测到旧版 v0 服务仍在系统里（与 v2 不兼容，会占用 9090/19090 等端口）："
+  printf '     • %s\n' "${V0_UNITS[@]}"
+  read -rp "   停止并禁用？[Y/n]: " _v0
+  if [[ "${_v0,,}" != "n" ]]; then
+    for u in "${V0_UNITS[@]}"; do
+      systemctl disable --now "$u" 2>/dev/null || true
+      rm -f "/etc/systemd/system/$u"
+    done
+    rm -f /usr/local/bin/relay-rs
+    systemctl daemon-reload
+    echo "   ✅ 旧 v0 已清理"
   fi
 fi
 
