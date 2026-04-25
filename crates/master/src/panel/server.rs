@@ -612,11 +612,29 @@ async fn handle_create_enrollment(
         Err(e) => return server_error(e),
     };
 
-    // master URL（让 install 命令可以直接 paste）：优先用 RELAY_MASTER_PUBLIC_URL，
-    // 退化到 external_base_url 把 https/http 部分留下。
+    // master URL（让 install 命令可以直接 paste）：
+    // 1. 优先 RELAY_MASTER_PUBLIC_URL
+    // 2. 退化：RELAY_PANEL_EXTERNAL_URL 的 host + RELAY_MASTER_LISTEN 的 port，scheme 强制 https
+    // 3. 最后 fallback 占位符
     let master_url = std::env::var("RELAY_MASTER_PUBLIC_URL")
         .ok()
         .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            let panel = std::env::var("RELAY_PANEL_EXTERNAL_URL").ok()?;
+            let host = panel
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .split('/')
+                .next()?
+                .split(':')
+                .next()?;
+            if host.is_empty() {
+                return None;
+            }
+            let listen = std::env::var("RELAY_MASTER_LISTEN").ok()?;
+            let port = listen.rsplit(':').next()?;
+            Some(format!("https://{host}:{port}"))
+        })
         .unwrap_or_else(|| "https://<master-host>:9443".to_string());
 
     use base64::Engine;
