@@ -285,8 +285,30 @@ if command -v docker >/dev/null 2>&1 && [[ -z "${DATABASE_URL:-}" ]]; then
   fi
 fi
 
-if [[ -n "${DATABASE_URL:-}" ]] && command -v psql >/dev/null 2>&1; then
-  if psql "$DATABASE_URL" -c 'SELECT 1' >/dev/null 2>&1; then
+# Returns 0 if we can actually connect to the given DATABASE_URL (TCP + psql).
+check_db_url() {
+  local url="$1"
+  local hp h p
+  hp=$(printf '%s' "$url" | sed -E 's|.*@([^/?]+).*|\1|')
+  h="${hp%:*}"; p="${hp##*:}"
+  [[ -z "$h" || -z "$p" ]] && return 1
+  # Cheap TCP probe first.
+  if ! timeout 3 bash -c "exec 3<>/dev/tcp/$h/$p" 2>/dev/null; then
+    return 1
+  fi
+  # Auth probe via psql if available; otherwise via dockerized psql.
+  if command -v psql >/dev/null 2>&1; then
+    psql "$url" -tAc 'SELECT 1' >/dev/null 2>&1
+  elif command -v docker >/dev/null 2>&1; then
+    docker run --rm --network host postgres:16-alpine psql "$url" -tAc 'SELECT 1' >/dev/null 2>&1
+  else
+    # No way to verify auth, accept the TCP probe.
+    return 0
+  fi
+}
+
+if [[ -n "${DATABASE_URL:-}" ]]; then
+  if check_db_url "$DATABASE_URL"; then
     echo "▶ Reusing reachable DATABASE_URL"
     PG_OK=true
   fi
@@ -296,9 +318,13 @@ fi
 if ! $PG_OK && [[ -z "${DATABASE_URL:-}" && -f "$ENV_FILE" ]]; then
   PREV_URL=$(grep -E '^DATABASE_URL=' "$ENV_FILE" 2>/dev/null | head -n1 | cut -d= -f2-)
   if [[ -n "$PREV_URL" ]]; then
-    DATABASE_URL="$PREV_URL"
-    echo "▶ Reusing DATABASE_URL from $ENV_FILE"
-    PG_OK=true
+    if check_db_url "$PREV_URL"; then
+      DATABASE_URL="$PREV_URL"
+      echo "▶ Reusing DATABASE_URL from $ENV_FILE"
+      PG_OK=true
+    else
+      echo "  · 旧 env 里的 DATABASE_URL 不可达 ($PREV_URL)，将重新 provision"
+    fi
   fi
 fi
 
