@@ -440,6 +440,22 @@ mkdir -p "$CONFIG_DIR" "$CA_DIR"
 
 JWT_SECRET=$(openssl rand -hex 32)
 
+# ── 面板对外 URL（必填，Discourse SSO 校验依赖它）────────────────
+echo
+echo "─── 面板对外 URL（必填）───"
+echo "Discourse 会按这里的 host 去匹配 discourse_connect_provider_secrets。"
+echo "必须跟你 Discourse 后台那一行 \`<host>|<secret>\` 左边的域名一致。"
+echo "示例：https://panel.example.com  （末尾不要带斜杠）"
+PANEL_EXTERNAL_URL=""
+while [[ -z "$PANEL_EXTERNAL_URL" ]]; do
+  read -rp "  面板对外 URL: " PANEL_EXTERNAL_URL
+  if [[ ! "$PANEL_EXTERNAL_URL" =~ ^https?:// ]]; then
+    echo "  ❌ 必须以 http:// 或 https:// 开头"
+    PANEL_EXTERNAL_URL=""
+  fi
+done
+PANEL_EXTERNAL_URL="${PANEL_EXTERNAL_URL%/}"
+
 cat > "$ENV_FILE" <<ENV
 # relay-master configuration
 RELAY_MASTER_CA_DIR=$CA_DIR
@@ -448,7 +464,7 @@ RELAY_MASTER_LISTEN=0.0.0.0:$GRPC_PORT
 RELAY_MASTER_HOSTNAME=$HOSTNAME
 DATABASE_URL=$DATABASE_URL
 RELAY_PANEL_LISTEN=0.0.0.0:$PANEL_PORT
-RELAY_PANEL_EXTERNAL_URL=https://your-panel.example/
+RELAY_PANEL_EXTERNAL_URL=$PANEL_EXTERNAL_URL
 # 32-byte hex secret. Rotating it logs out every panel session.
 RELAY_PANEL_JWT_SECRET=$JWT_SECRET
 RUST_LOG=info
@@ -537,8 +553,7 @@ echo ""
 echo "Endpoints:"
 echo "  · Web panel : http://$PUB_IP:$PANEL_PORT  (terminate TLS at a reverse proxy)"
 echo "  · gRPC mTLS : https://$PUB_IP:$GRPC_PORT  (node ingress)"
-echo ""
-echo "⚠️  Edit $ENV_FILE and set RELAY_PANEL_EXTERNAL_URL to the real public URL."
+echo "  · 对外 URL  : $PANEL_EXTERNAL_URL"
 echo ""
 echo "Add a node:"
 echo "  1) On this host, generate a one-time enrollment token:"
