@@ -2,9 +2,9 @@ name: Check
 
 on:
   push:
-    branches: [main, v1]
+    branches: [main]
   pull_request:
-    branches: [main, v1]
+    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
@@ -12,7 +12,7 @@ env:
 
 jobs:
   check:
-    name: build + clippy + test
+    name: clippy + test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -23,22 +23,16 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: cargo build (workspace)
-        run: cargo build --workspace --all-targets
-
-      - name: cargo clippy (v1 crates only, deny warnings)
+      - name: cargo clippy (deny warnings)
         run: |
           cargo clippy --all-targets \
             -p relay-proto -p relay-master -p relay-node -- -D warnings
-
-      - name: cargo clippy (v0 relay-rs, warn only)
-        run: cargo clippy --all-targets -p relay-rs || true
 
       - name: cargo test (workspace)
         run: cargo test --workspace
 
   migrations:
-    name: apply v1 migrations
+    name: apply migrations
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -55,21 +49,21 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@v6
-      - name: apply & re-apply (幂等性)
+      - name: apply twice (idempotency check)
         env:
           PGPASSWORD: postgres
         run: |
           for i in 1 2; do
             echo "=== run $i ==="
-            psql -h localhost -U postgres -d relay -v ON_ERROR_STOP=1 \
-              -f crates/master/migrations/0001_v1_init.sql
+            for f in crates/master/migrations/*.sql; do
+              echo "-- applying $f"
+              psql -h localhost -U postgres -d relay -v ON_ERROR_STOP=1 -f "$f"
+            done
           done
-          echo "=== tables ==="
-          psql -h localhost -U postgres -d relay -c "\dt v1_*"
-          psql -h localhost -U postgres -d relay -c "\dT v1_*"
+          psql -h localhost -U postgres -d relay -c "\dt"
 
-  smoke-m3:
-    name: M3 end-to-end smoke (master + node + Sync)
+  smoke:
+    name: end-to-end smoke (master + node)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -94,4 +88,4 @@ jobs:
         env:
           DATABASE_URL: postgresql://relay:relay@127.0.0.1:25432/relay
           RUST_LOG: info
-        run: bash scripts/v1-smoke-m3.sh
+        run: bash scripts/smoke.sh

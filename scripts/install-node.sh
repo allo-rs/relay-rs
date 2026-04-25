@@ -1,136 +1,202 @@
 #!/usr/bin/env bash
-# relay-rs 节点一键安装脚本（v0.x：env 驱动，state.json 持久化，不再写 TOML）
-# 用法：
-#   curl -fsSL https://raw.githubusercontent.com/allo-rs/relay-rs/main/scripts/install-node.sh \
-#     | bash -s -- --port 19090 --pubkey-b64 <base64_pubkey>
+# relay-node installer / updater / uninstaller
+#
+# Usage:
+#   bash <(curl -fsSL https://raw.githubusercontent.com/allo-rs/relay-rs/main/scripts/install-node.sh) \
+#     --master https://master.example.com:9443 \
+#     --ca-b64 <base64 CA bundle from the master> \
+#     --enrollment-token <one-time token from `relay-master node-add`> \
+#     --node-name <name; must match the one passed to node-add>
+#
+# Optional environment variables:
+#   VERSION        Pin a release tag (default: latest)
+#   GITHUB_PROXY   GitHub download proxy prefix
+
 set -euo pipefail
 
 REPO="allo-rs/relay-rs"
-INSTALL_BIN="/usr/local/bin/relay-rs"
+INSTALL_BIN="/usr/local/bin/relay-node"
 CONFIG_DIR="/etc/relay-rs"
-ENV_FILE="$CONFIG_DIR/node.env"
-STATE_DIR="/var/lib/relay-rs"
-SERVICE_FILE="/etc/systemd/system/relay-rs-node.service"
-SERVICE_NAME="relay-rs-node"
-LEGACY_SERVICE_FILE="/etc/systemd/system/relay-rs.service"
-LEGACY_TOML="$CONFIG_DIR/relay.toml"
+ENV_FILE="$CONFIG_DIR/relay-node.env"
+STATE_DIR="/var/lib/relay-node"
+SERVICE_FILE="/etc/systemd/system/relay-node.service"
+SERVICE_NAME="relay-node"
 
-PORT=19090
-PUBKEY_B64=""
+MASTER=""
+CA_B64=""
+TOKEN=""
+NODE_NAME=""
+ACTION=""
 
-[[ $EUID -ne 0 ]] && { echo "请以 root 运行"; exit 1; }
+[[ $EUID -ne 0 ]] && { echo "Please run as root"; exit 1; }
 
-# ── 解析参数 ──────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --port)       PORT="$2";       shift 2 ;;
-    --pubkey-b64) PUBKEY_B64="$2"; shift 2 ;;
-    *) echo "未知参数: $1"; exit 1 ;;
+    --master)             MASTER="$2";    shift 2 ;;
+    --ca-b64)             CA_B64="$2";    shift 2 ;;
+    --enrollment-token)   TOKEN="$2";     shift 2 ;;
+    --node-name)          NODE_NAME="$2"; shift 2 ;;
+    --uninstall)          ACTION="uninstall"; shift ;;
+    --update)             ACTION="update";    shift ;;
+    *) echo "Unknown argument: $1"; exit 1 ;;
   esac
 done
 
-if [[ -z "$PUBKEY_B64" ]]; then
-  echo "错误：缺少 --pubkey-b64 参数"; exit 1
+IS_INSTALLED=false
+[[ -f "$INSTALL_BIN" && -f "$STATE_DIR/node_id" ]] && IS_INSTALLED=true
+
+if [[ -z "$ACTION" && -z "$MASTER" ]]; then
+  echo ""
+  echo "╔══════════════════════════════════════════════════╗"
+  echo "║           relay-node installer                    ║"
+  echo "╚══════════════════════════════════════════════════╝"
+  echo ""
+  if $IS_INSTALLED; then
+    echo "  node_id: $(cat "$STATE_DIR/node_id" 2>/dev/null || echo unknown)"
+    echo ""
+    echo "  1. Update binary (keep cert + state)"
+    echo "  2. Re-register (clears cert, runs enrollment again)"
+    echo "  3. Uninstall"
+    echo "  4. Quit"
+    read -rp "Choice [1-4]: " CHOICE
+    case "${CHOICE:-1}" in
+      1) ACTION="update" ;;
+      2) ACTION="reregister" ;;
+      3) ACTION="uninstall" ;;
+      4) exit 0 ;;
+      *) echo "Invalid choice"; exit 1 ;;
+    esac
+  else
+    echo "No relay-node installation detected. Run with arguments:"
+    echo "  $0 --master <grpc-addr> --ca-b64 <base64> --enrollment-token <t> --node-name <name>"
+    exit 1
+  fi
 fi
 
-# 验证 base64 可解码
-if ! echo "$PUBKEY_B64" | base64 -d >/dev/null 2>&1; then
-  echo "错误：--pubkey-b64 不是合法的 base64"; exit 1
+if [[ "$ACTION" == "uninstall" ]]; then
+  read -rp "⚠️  Uninstall will remove the cert and state. Continue? [y/N]: " _c
+  [[ "${_c,,}" != "y" ]] && exit 0
+  systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
+  rm -f "$SERVICE_FILE" "$INSTALL_BIN" "$ENV_FILE"
+  rm -rf "$STATE_DIR"
+  systemctl daemon-reload
+  echo "✅ relay-node uninstalled"
+  exit 0
 fi
 
-# ── 检测架构 ──────────────────────────────────────────────────────
 ARCH=$(uname -m)
 case "$ARCH" in
-  x86_64)          BIN_ARCH="x86_64-unknown-linux-musl" ;;
-  aarch64|arm64)   BIN_ARCH="aarch64-unknown-linux-musl" ;;
-  *) echo "不支持的架构: $ARCH"; exit 1 ;;
+  x86_64)        TRIPLE="x86_64-unknown-linux-musl" ;;
+  aarch64|arm64) TRIPLE="aarch64-unknown-linux-musl" ;;
+  *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
 esac
 
-# ── 选择下载代理 ──────────────────────────────────────────────────
+if [[ -z "${VERSION:-}" ]]; then
+  VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
+    | grep '"tag_name"' | head -1 | cut -d'"' -f4)
+  [[ -z "$VERSION" ]] && { echo "Could not resolve latest version"; exit 1; }
+fi
+
 _PROXY_DEFAULT="https://gh-proxy.org/"
 if [[ -z "${GITHUB_PROXY+x}" ]]; then
   if curl -fsSL --connect-timeout 5 --max-time 8 -o /dev/null "https://github.com" 2>/dev/null; then
     GITHUB_PROXY=""
   else
-    echo "GitHub 直连慢，启用代理 $_PROXY_DEFAULT"
     GITHUB_PROXY="$_PROXY_DEFAULT"
   fi
 fi
 
-# ── 下载二进制 ────────────────────────────────────────────────────
-echo "▶ 获取最新版本..."
-VERSION=$(curl -fsSL --connect-timeout 10 --max-time 30 \
-  "https://api.github.com/repos/$REPO/releases/latest" \
-  | grep '"tag_name"' | head -1 | cut -d'"' -f4)
+download_bin() {
+  local artifact="$1" dest="$2"
+  local url="${GITHUB_PROXY}https://github.com/$REPO/releases/download/$VERSION/$artifact"
+  echo "▶ Downloading $artifact ..."
+  local tmp
+  tmp=$(mktemp -p /var/tmp 2>/dev/null || mktemp)
+  curl -fsSL --connect-timeout 10 --max-time 180 "$url" -o "$tmp" \
+    || { rm -f "$tmp"; echo "Download failed: $url"; exit 1; }
+  chmod +x "$tmp"; mv "$tmp" "$dest"
+}
 
-if [[ -z "$VERSION" ]]; then
-  echo "错误：无法获取版本号，请检查网络或手动安装"
+if [[ "$ACTION" == "update" ]]; then
+  download_bin "relay-node-$TRIPLE" "$INSTALL_BIN"
+  systemctl restart "$SERVICE_NAME" 2>/dev/null || true
+  echo "✅ Update complete (version $VERSION)"
+  exit 0
+fi
+
+if [[ "$ACTION" == "reregister" ]]; then
+  read -rp "master gRPC URL (e.g. https://master:9443): " MASTER
+  read -rp "CA bundle (base64): " CA_B64
+  read -rp "enrollment token: " TOKEN
+  read -rp "node name: " NODE_NAME
+  systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+  rm -rf "$STATE_DIR"
+fi
+
+for v in MASTER CA_B64 TOKEN NODE_NAME; do
+  if [[ -z "${!v}" ]]; then
+    echo "Error: missing argument --${v,,} (env $v is empty)"
+    exit 1
+  fi
+done
+
+echo "$CA_B64" | base64 -d >/dev/null 2>&1 || { echo "--ca-b64 is not valid base64"; exit 1; }
+
+download_bin "relay-node-$TRIPLE" "$INSTALL_BIN"
+
+mkdir -p "$CONFIG_DIR" "$STATE_DIR"
+chmod 700 "$STATE_DIR"
+
+echo "▶ Registering with master..."
+if ! MASTER_ADDR="$MASTER" \
+     MASTER_CA_PEM_B64="$CA_B64" \
+     ENROLLMENT_TOKEN="$TOKEN" \
+     NODE_NAME="$NODE_NAME" \
+     NODE_STATE_DIR="$STATE_DIR" \
+     "$INSTALL_BIN" register; then
+  echo "❌ Registration failed. Check master URL, CA bundle, and token."
   exit 1
 fi
 
-BIN_URL="${GITHUB_PROXY}https://github.com/$REPO/releases/download/$VERSION/relay-rs-$BIN_ARCH"
-echo "▶ 下载 relay-rs $VERSION ($BIN_ARCH)..."
-TMP_BIN=$(mktemp)
-curl -fsSL --connect-timeout 10 --max-time 120 "$BIN_URL" -o "$TMP_BIN" || { rm -f "$TMP_BIN"; exit 1; }
-chmod +x "$TMP_BIN"
-mv "$TMP_BIN" "$INSTALL_BIN"
-
-# ── 准备目录 ──────────────────────────────────────────────────────
-mkdir -p "$CONFIG_DIR"
-install -d -m 0700 "$STATE_DIR"
-
-# ── 写入 env 文件（v0.x：唯一配置入口）────────────────────────────
-echo "▶ 写入配置 $ENV_FILE..."
-umask 077
-cat > "$ENV_FILE" << ENV
-# relay-rs node env（由 install-node.sh 生成，systemd EnvironmentFile 读取）
-MASTER_PUBKEY_B64=$PUBKEY_B64
-PANEL_LISTEN=0.0.0.0:$PORT
+cat > "$ENV_FILE" <<ENV
+MASTER_ADDR=$MASTER
+NODE_STATE_DIR=$STATE_DIR
+RUST_LOG=info
 ENV
 chmod 600 "$ENV_FILE"
 
-# ── 清理冲突：老 relay-rs.service（v1.7.7 之前会和 master 冲突）──
-if [[ -f "$LEGACY_SERVICE_FILE" ]]; then
-  echo "▶ 清理旧服务 relay-rs.service..."
-  systemctl disable --now relay-rs 2>/dev/null || true
-  rm -f "$LEGACY_SERVICE_FILE"
-fi
-
-# 老 relay.toml 保留（node 首次启动会自动迁移为 state.json + relay.toml.migrated-bak）
-if [[ -f "$LEGACY_TOML" ]]; then
-  echo "▶ 检测到旧配置 $LEGACY_TOML，首次启动时将自动迁移到 $STATE_DIR/state.json"
-fi
-
-# ── 创建 systemd 服务 ─────────────────────────────────────────────
-echo "▶ 配置 systemd 服务..."
-cat > "$SERVICE_FILE" << UNIT
+cat > "$SERVICE_FILE" <<UNIT
 [Unit]
-Description=relay-rs node
-After=network.target
+Description=relay-node data plane (gRPC over mTLS)
+After=network-online.target
+Wants=network-online.target
 
 [Service]
-Type=simple
 EnvironmentFile=$ENV_FILE
 ExecStart=$INSTALL_BIN daemon
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=65536
-StateDirectory=relay-rs
 
 [Install]
 WantedBy=multi-user.target
 UNIT
 
-# ── 启动服务 ──────────────────────────────────────────────────────
 systemctl daemon-reload
-systemctl enable "$SERVICE_NAME"
-# 强制重启以应用新的二进制和 unit 文件
-systemctl restart "$SERVICE_NAME"
+systemctl enable --now "$SERVICE_NAME"
 
+sleep 2
 echo ""
-echo "✓ relay-rs node 安装完成，版本 $VERSION"
-echo "  监听端口: $PORT"
-echo "  规则持久化: $STATE_DIR/state.json"
-echo "  env 文件:  $ENV_FILE"
-echo "  systemctl status $SERVICE_NAME"
-
+if systemctl is-active --quiet "$SERVICE_NAME"; then
+  echo "✅ relay-node installed and running (version $VERSION)"
+  echo "   node_id: $(cat "$STATE_DIR/node_id")"
+else
+  echo "❌ relay-node binary deployed but the service is not active:"
+  journalctl -u "$SERVICE_NAME" -n 40 --no-pager
+  exit 1
+fi
+echo ""
+echo "Common commands:"
+echo "  systemctl status $SERVICE_NAME    service status"
+echo "  journalctl -u $SERVICE_NAME -f    follow logs"
+echo "  cat $STATE_DIR/node_id            show node_id"

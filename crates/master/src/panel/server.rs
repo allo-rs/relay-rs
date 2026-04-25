@@ -624,7 +624,7 @@ async fn handle_create_enrollment(
         base64::engine::general_purpose::STANDARD.encode(state.ca.cert_pem.as_bytes());
 
     let install_cmd = format!(
-        "bash <(curl -fsSL https://raw.githubusercontent.com/allo-rs/relay-rs/v1/scripts/install-node-v1.sh) \
+        "bash <(curl -fsSL https://raw.githubusercontent.com/allo-rs/relay-rs/main/scripts/install-node.sh) \
 --master {master_url} --ca-b64 \"{ca}\" --enrollment-token {token} --node-name {name}",
         master_url = master_url,
         ca = ca_b64,
