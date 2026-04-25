@@ -1,6 +1,6 @@
 [package]
 name = "relay-master"
-version = "2.0.3"
+version = "2.2.0"
 edition = "2024"
 description = "relay-rs v1 控制面（无数据面）"
 publish = false

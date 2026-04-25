@@ -1,6 +1,6 @@
 [package]
 name = "relay-proto"
-version = "2.0.3"
+version = "2.2.0"
 edition = "2024"
 description = "relay-rs v1 控制面协议生成代码（tonic + prost）"
 publish = false
