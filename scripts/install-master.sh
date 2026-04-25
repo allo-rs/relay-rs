@@ -212,15 +212,39 @@ if ! $PG_OK; then
       # Pick a free host port — if 5432 is busy, ask the operator instead
       # of silently spinning up a second postgres on a different port.
       if ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "[:.]5432\$"; then
-        echo "  · port 5432 is already in use (another Postgres is running)."
-        echo "    The installer will not start a second one."
-        read -rp "Paste DATABASE_URL pointing to the existing Postgres (e.g. postgresql://user:pass@127.0.0.1:5432/relay): " DATABASE_URL
-        [[ -z "$DATABASE_URL" ]] && { echo "DATABASE_URL required"; exit 1; }
-        if command -v psql >/dev/null 2>&1; then
-          if ! psql "$DATABASE_URL" -c 'SELECT 1' >/dev/null 2>&1; then
-            echo "❌ Cannot connect to provided DATABASE_URL"; exit 1
+        echo "  · port 5432 is already serving Postgres — will provision into it."
+        echo "    Provide an admin connection URL; the installer will CREATE USER + CREATE DATABASE."
+        read -rp "Admin URL (e.g. postgresql://postgres:PASS@127.0.0.1:5432/postgres): " ADMIN_URL
+        [[ -z "$ADMIN_URL" ]] && { echo "admin URL required"; exit 1; }
+
+        # psql shim: prefer host binary, fall back to dockerized psql (host network)
+        psql_run() {
+          if command -v psql >/dev/null 2>&1; then
+            psql "$@"
+          else
+            docker run --rm -i --network host postgres:16-alpine psql "$@"
           fi
+        }
+
+        if ! psql_run "$ADMIN_URL" -v ON_ERROR_STOP=1 -c 'SELECT 1' >/dev/null 2>&1; then
+          echo "❌ Cannot connect with admin URL"; exit 1
         fi
+
+        PG_PASS=$(openssl rand -hex 16)
+        # CREATE or ALTER user (idempotent), then CREATE DATABASE if missing.
+        if psql_run "$ADMIN_URL" -tAc "SELECT 1 FROM pg_roles WHERE rolname='$PG_USER'" 2>/dev/null | grep -q 1; then
+          psql_run "$ADMIN_URL" -v ON_ERROR_STOP=1 -c "ALTER USER \"$PG_USER\" WITH PASSWORD '$PG_PASS';" >/dev/null
+        else
+          psql_run "$ADMIN_URL" -v ON_ERROR_STOP=1 -c "CREATE USER \"$PG_USER\" WITH PASSWORD '$PG_PASS';" >/dev/null
+        fi
+        if ! psql_run "$ADMIN_URL" -tAc "SELECT 1 FROM pg_database WHERE datname='$PG_DB'" 2>/dev/null | grep -q 1; then
+          psql_run "$ADMIN_URL" -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"$PG_DB\" OWNER \"$PG_USER\";" >/dev/null
+        fi
+
+        # Reuse host:port from admin URL for the final connection string.
+        ADMIN_HOSTPORT=$(printf '%s' "$ADMIN_URL" | sed -E 's|.*@([^/?]+).*|\1|')
+        DATABASE_URL="postgresql://$PG_USER:$PG_PASS@$ADMIN_HOSTPORT/$PG_DB"
+        echo "  · provisioned $PG_DB / $PG_USER on existing Postgres"
         NEEDS_DOCKER=false
         PG_OK=true
       else
