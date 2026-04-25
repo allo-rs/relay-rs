@@ -54,20 +54,16 @@ echo ""
 echo "请选择操作:"
 echo "  1. 全新安装 / 重装          (覆盖二进制 + 配置 + 重置 CA)"
 echo "  2. 更新版本                 (只换二进制，保留 CA / 数据库 / 配置)"
-echo "  3. 重新签发 gRPC server 证书"
-echo "  4. 导出 CA bundle           (用于 node 加入)"
-echo "  5. 查看面板地址 / 服务状态"
-echo "  6. 卸载"
+echo "  3. 查看面板地址 / 服务状态"
+echo "  4. 卸载"
 echo "  0. 退出"
 echo ""
-read -rp "请选择 [0-6]: " CHOICE
+read -rp "请选择 [0-4]: " CHOICE
 case "${CHOICE:-0}" in
   1) ACTION="install" ;;
   2) $IS_INSTALLED || { echo "❌ 还没安装，先选 1"; exit 1; }; ACTION="update" ;;
-  3) $IS_INSTALLED || { echo "❌ 还没安装"; exit 1; }; ACTION="regen-server-cert" ;;
-  4) $IS_INSTALLED || { echo "❌ 还没安装"; exit 1; }; ACTION="show-ca" ;;
-  5) $IS_INSTALLED || { echo "❌ 还没安装"; exit 1; }; ACTION="status" ;;
-  6) $IS_INSTALLED || { echo "❌ 还没安装"; exit 0; }; ACTION="uninstall" ;;
+  3) $IS_INSTALLED || { echo "❌ 还没安装"; exit 1; }; ACTION="status" ;;
+  4) $IS_INSTALLED || { echo "❌ 还没安装"; exit 0; }; ACTION="uninstall" ;;
   0) exit 0 ;;
   *) echo "无效选项"; exit 1 ;;
 esac
