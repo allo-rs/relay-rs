@@ -1,0 +1,201 @@
+syntax = "proto3";
+package relay.v1;
+
+// relay-rs v1 控制面协议
+//
+// 设计要点（见 v1_plan.md §11）：
+// - per-node desired_revision，不做全局一致性判断
+// - desired / applied 双态（node 端），Ack 带 applied_hash + per_segment_status
+// - chain 用 segment 图，不是 hop 数组；master 下发前预校验回路/端口冲突
+// - mTLS 引导：enrollment_token 首次签发；Renew() 在线续签；CA 轮换用 ca_bundle_version
+// - stream fencing：每次新连接 stream_id 变化；过期 stream 的 Ack 丢弃
+
+service ControlPlane {
+  // 首次注册：持有 enrollment_token，换取 client cert
+  rpc Register(RegisterReq) returns (RegisterResp);
+  // 在线续签（剩余有效期 <30 天时调用）
+  rpc Renew(RenewReq) returns (RenewResp);
+  // 双向长流：desired push + ack / metrics / log
+  rpc Sync(stream NodeToMaster) returns (stream MasterToNode);
+}
+
+// ── 注册 / 续签 ───────────────────────────────────────────────────
+
+message RegisterReq {
+  string node_name = 1;          // 运维填写的可读名
+  string enrollment_token = 2;   // master 端 `node-add` 生成的一次性 token
+  bytes  csr_pem = 3;            // node 本地生成
+}
+message RegisterResp {
+  string node_id = 1;            // master 分配，之后作为 cert SAN
+  bytes  cert_pem = 2;
+  repeated bytes ca_bundle_pem = 3;
+  uint32 ca_bundle_version = 4;
+}
+
+message RenewReq { bytes csr_pem = 1; }
+message RenewResp {
+  bytes  cert_pem = 1;
+  repeated bytes ca_bundle_pem = 2;
+  uint32 ca_bundle_version = 3;
+}
+
+// ── 双向流 ────────────────────────────────────────────────────────
+
+message NodeToMaster {
+  oneof msg {
+    Hello hello = 1;
+    SegmentAck ack = 2;
+    Metrics metrics = 3;
+    NodeLog log = 4;
+    RequestFullSync request_full_sync = 5;
+  }
+}
+
+message MasterToNode {
+  oneof msg {
+    FullSync full_sync = 1;
+    // reserved = 2;  // 原 DeltaApply：M3 简化为只走 FullSync（rubber-duck: 避免 per-revision snapshot）；
+                     //  如 M5+ 有压测证据再引入。保留 tag 2 不复用，防止未来协议歧义。
+    Ping ping = 3;
+    Shutdown shutdown = 4;
+    CaBundleUpdate ca_update = 5;
+  }
+  reserved 2;
+  reserved "delta";
+}
+
+message Hello {
+  string stream_id = 1;          // UUIDv4，新连接每次重生成（stream fencing）
+  uint64 session_epoch = 2;      // node 本地进程重启计数
+  uint64 applied_revision = 3;   // node 实际生效的 desired_revision
+  // envelope hash = sha256(canonical(segments) || u32_be(ca_bundle_version))
+  bytes  applied_hash = 4;
+  uint32 ca_bundle_version = 5;
+  string version = 6;            // relay-rs node 二进制版本（用于运维观察）
+  // 注意：node_id 不在此字段，master 从 mTLS peer cert 的 CN 获取，防止伪造
+}
+
+message FullSync {
+  uint64 revision = 1;
+  repeated Segment segments = 2;
+}
+
+message DeltaApply {
+  // M3 暂不实现；保留定义不让未来提案回头重排 tag。
+  uint64 base_revision = 1;      // node 必须处于此 revision 才能接受
+  uint64 new_revision = 2;
+  repeated Segment add = 3;
+  repeated Segment update = 4;
+  repeated string remove_ids = 5;
+}
+
+message SegmentAck {
+  string stream_id = 1;                         // 必须与当前 stream 匹配，否则丢弃
+  uint64 revision = 2;
+  // desired envelope hash（master 下发时算的），node 原样回带，用于 master 幂等去重
+  bytes  desired_hash = 3;
+  // node 侧**实际**生效的 envelope hash：全部成功时 == desired_hash；
+  // 部分失败时反映实际应用了的 segments 集合，master 据此标 degraded 而不是被骗
+  bytes  actual_hash = 4;
+  repeated string actual_segment_ids = 5;       // 实际启动成功的 segment id（诚实状态）
+  map<string, ApplyResult> per_segment = 6;     // 覆盖 touched 的所有 segment（含 remove 尝试）
+}
+
+message ApplyResult {
+  bool   ok = 1;
+  string error = 2;              // 如 "bind EADDRINUSE on :80"
+}
+
+message Ping {
+  uint64 server_time_ms = 1;
+}
+
+message Shutdown { string reason = 1; }
+
+message CaBundleUpdate {
+  uint32 version = 1;
+  repeated bytes ca_bundle_pem = 2;
+}
+
+message RequestFullSync { string reason = 1; }
+
+message Metrics {
+  uint64 at_ms = 1;
+  repeated SegmentMetrics per_segment = 2;
+  UdpPressure udp = 3;
+}
+
+message SegmentMetrics {
+  string segment_id = 1;
+  uint64 bytes_in = 2;
+  uint64 bytes_out = 3;
+  uint64 connections = 4;
+  uint64 active_sessions = 5;
+}
+
+message UdpPressure {
+  uint64 session_table_size = 1;
+  uint64 rejected_total = 2;
+  uint64 evicted_total = 3;
+}
+
+message NodeLog {
+  uint64 at_ms = 1;
+  LogLevel level = 2;
+  string  message = 3;
+  optional string segment_id = 4;
+}
+
+enum LogLevel {
+  LOG_LEVEL_UNSPECIFIED = 0;
+  INFO = 1;
+  WARN = 2;
+  ERROR = 3;
+}
+
+// ── Segment 模型（chain 的最小单元） ──────────────────────────────
+
+message Segment {
+  string id = 1;                     // 稳定 UUID（master 生成）
+  string chain_id = 2;               // 归属哪条 chain，便于 UI 聚合
+  string listen_node_id = 3;         // 该 segment 由哪个 node 承接
+  string listen = 4;                 // "80" or "80-100"
+  Proto  proto = 5;
+  bool   ipv6 = 6;
+
+  oneof next {
+    NextSegment node_next = 7;       // 下一跳：另一段由 node 承接的 segment
+    Upstream    upstream  = 8;       // 下一跳：最终 upstream
+  }
+
+  optional uint32 rate_limit_mbps = 9;
+  Balance balance = 10;
+  optional string comment = 11;
+}
+
+message NextSegment {
+  // 下一跳 segment 的 id。master 拼具体 host:port 时会查对应 node 的 public_ip
+  // 和 segment.listen 的第一个端口。
+  string segment_id = 1;
+}
+
+message Upstream {
+  string host = 1;
+  uint32 port_start = 2;
+  uint32 port_end = 3;               // 端口段上界，=start 即单口
+}
+
+enum Proto {
+  PROTO_UNSPECIFIED = 0;
+  TCP = 1;
+  UDP = 2;
+  ALL = 3;
+}
+
+enum Balance {
+  BALANCE_UNSPECIFIED = 0;
+  ROUND_ROBIN = 1;
+  RANDOM = 2;
+  SOURCE_HASH = 3;
+}

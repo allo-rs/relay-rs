@@ -8,6 +8,8 @@ import {
   ShieldCheck,
   Sun,
   Moon,
+  Zap,
+  Network,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { logout as apiLogout } from "@/lib/auth";
@@ -22,10 +24,12 @@ type NavItem = {
 };
 
 const NAV_ITEMS: NavItem[] = [
-  { to: "/",          label: "概览", icon: LayoutDashboard, end: true },
-  { to: "/forwards",  label: "转发", icon: ArrowRightLeft },
-  { to: "/nodes",     label: "节点", icon: Server },
-  { to: "/settings",  label: "设置", icon: SettingsIcon },
+  { to: "/",             label: "概览",   icon: LayoutDashboard, end: true },
+  { to: "/forwards",     label: "转发",   icon: ArrowRightLeft },
+  { to: "/nodes",        label: "节点",   icon: Server },
+  { to: "/v1/nodes",     label: "v1 节点", icon: Zap },
+  { to: "/v1/segments",  label: "v1 段",  icon: Network },
+  { to: "/settings",     label: "设置",   icon: SettingsIcon },
 ];
 
 const btnCls = cn(
@@ -81,8 +85,8 @@ export default function DynamicIsland() {
                     "group flex items-center gap-1.5 rounded-full px-3 py-1.5",
                     "text-xs font-medium transition-all duration-200",
                     isActive
-                      ? "bg-white text-neutral-900 shadow-sm"
-                      : "text-neutral-100/70 hover:text-neutral-100 hover:bg-white/10"
+                      ? "bg-white text-neutral-900 font-semibold shadow-[0_0_12px_rgba(255,255,255,0.2)]"
+                      : "text-neutral-400 hover:text-neutral-100 hover:bg-white/10"
                   )
                 }
               >

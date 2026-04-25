@@ -20,10 +20,8 @@ jobs:
         include:
           - target: x86_64-unknown-linux-musl
             runner: ubuntu-latest
-            artifact: relay-rs-x86_64-unknown-linux-musl
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
-            artifact: relay-rs-aarch64-unknown-linux-musl
 
     steps:
       - uses: actions/checkout@v6
@@ -51,16 +49,24 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: 编译
-        run: cargo build --release --target ${{ matrix.target }}
+        run: |
+          cargo build --release --target ${{ matrix.target }} \
+            -p relay-rs -p relay-master -p relay-node
 
       - name: 重命名产物
-        run: cp target/${{ matrix.target }}/release/relay-rs ${{ matrix.artifact }}
+        run: |
+          cp target/${{ matrix.target }}/release/relay-rs     relay-rs-${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/relay-master relay-master-${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/relay-node   relay-node-${{ matrix.target }}
 
       - name: 上传 artifact
         uses: actions/upload-artifact@v6
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}
+          name: binaries-${{ matrix.target }}
+          path: |
+            relay-rs-${{ matrix.target }}
+            relay-master-${{ matrix.target }}
+            relay-node-${{ matrix.target }}
 
   release:
     name: 发布 Release

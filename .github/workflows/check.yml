@@ -1,0 +1,97 @@
+name: Check
+
+on:
+  push:
+    branches: [main, v1]
+  pull_request:
+    branches: [main, v1]
+
+env:
+  CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  check:
+    name: build + clippy + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo build (workspace)
+        run: cargo build --workspace --all-targets
+
+      - name: cargo clippy (v1 crates only, deny warnings)
+        run: |
+          cargo clippy --all-targets \
+            -p relay-proto -p relay-master -p relay-node -- -D warnings
+
+      - name: cargo clippy (v0 relay-rs, warn only)
+        run: cargo clippy --all-targets -p relay-rs || true
+
+      - name: cargo test (workspace)
+        run: cargo test --workspace
+
+  migrations:
+    name: apply v1 migrations
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: relay
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: apply & re-apply (幂等性)
+        env:
+          PGPASSWORD: postgres
+        run: |
+          for i in 1 2; do
+            echo "=== run $i ==="
+            psql -h localhost -U postgres -d relay -v ON_ERROR_STOP=1 \
+              -f crates/master/migrations/0001_v1_init.sql
+          done
+          echo "=== tables ==="
+          psql -h localhost -U postgres -d relay -c "\dt v1_*"
+          psql -h localhost -U postgres -d relay -c "\dT v1_*"
+
+  smoke-m3:
+    name: M3 end-to-end smoke (master + node + Sync)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: relay
+          POSTGRES_USER: relay
+          POSTGRES_PASSWORD: relay
+        ports: ['25432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install psql + nc
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client netcat-openbsd
+      - name: run smoke
+        env:
+          DATABASE_URL: postgresql://relay:relay@127.0.0.1:25432/relay
+          RUST_LOG: info
+        run: bash scripts/v1-smoke-m3.sh

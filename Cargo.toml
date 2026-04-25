@@ -1,6 +1,9 @@
+[workspace]
+members = [".", "crates/proto", "crates/master", "crates/node"]
+
 [package]
 name = "relay-rs"
-version = "1.8.0"
+version = "2.0.0"
 edition = "2024"
 
 [dependencies]
