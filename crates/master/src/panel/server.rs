@@ -479,7 +479,7 @@ async fn handle_logout(State(state): State<Arc<AppState>>) -> Response {
 
 async fn handle_list_nodes(State(state): State<Arc<AppState>>) -> Response {
     match admin::node_list_rows(&state.db).await {
-        Ok(rows) => Json(json!({ "items": rows })).into_response(),
+        Ok(rows) => Json(rows).into_response(),
         Err(e) => server_error(e),
     }
 }
@@ -511,7 +511,7 @@ async fn handle_list_segments(
     Query(q): Query<SegListQuery>,
 ) -> Response {
     match admin::seg_list_rows(&state.db, q.node.as_deref()).await {
-        Ok(rows) => Json(json!({ "items": rows })).into_response(),
+        Ok(rows) => Json(rows).into_response(),
         Err(e) => server_error(e),
     }
 }
