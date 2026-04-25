@@ -35,6 +35,9 @@ jobs:
         working-directory: panel
         run: bun install --frozen-lockfile && bun run build
 
+      - name: Run tests
+        run: cargo test --workspace
+
       - name: Install musl tools
         run: sudo apt-get install -y musl-tools
 

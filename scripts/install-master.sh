@@ -180,18 +180,61 @@ fi
 
 # ── uninstall ────────────────────────────────────────────────────
 if [[ "$ACTION" == "uninstall" ]]; then
-  read -rp "⚠️  Uninstall will remove CA, enrollment tokens, and the env file. Continue? [y/N]: " _confirm
-  [[ "${_confirm,,}" != "y" ]] && { echo "Cancelled"; exit 0; }
+  echo ""
+  echo "⚠️  卸载将执行："
+  echo "    必删:"
+  echo "      • systemctl disable --now relay-master"
+  echo "      • $SERVICE_FILE"
+  echo "      • $INSTALL_BIN"
+  echo "      • $ENV_FILE"
+  echo "      • $CA_DIR/        (含 CA 私钥、server cert、所有 enrollment tokens)"
+  echo "      • $CONFIG_DIR/relay-ca.b64"
+  echo ""
+  echo "    可选 (会再问):"
+  echo "      • docker 容器 $PG_CONTAINER + volume ${PG_CONTAINER}-data"
+  echo "      • 外部 Postgres 上的 \`$PG_DB\` 数据库（如果走的是已有 pg）"
+  echo ""
+  echo "    不删:"
+  echo "      • /usr/local/bin/relay-node 及其 systemd unit（属于 node 角色）"
+  echo "      • $CONFIG_DIR/ 目录本身（可能还有 node 的 env）"
+  echo ""
+  read -rp "继续？[y/N]: " _confirm
+  [[ "${_confirm,,}" != "y" ]] && { echo "已取消"; exit 0; }
+
+  # Capture DATABASE_URL before we wipe the env file (needed for optional drop-db)
+  PRE_DB_URL=""
+  [[ -f "$ENV_FILE" ]] && PRE_DB_URL=$(grep -E '^DATABASE_URL=' "$ENV_FILE" 2>/dev/null | head -n1 | cut -d= -f2-)
+
   systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
-  rm -f "$SERVICE_FILE" "$INSTALL_BIN" "$ENV_FILE"
+  rm -f "$SERVICE_FILE" "$INSTALL_BIN" "$ENV_FILE" "$CONFIG_DIR/relay-ca.b64"
   rm -rf "$CA_DIR"
   systemctl daemon-reload
-  read -rp "Also remove the managed Postgres container '$PG_CONTAINER' and its volume? [y/N]: " _pg
-  if [[ "${_pg,,}" == "y" ]] && command -v docker >/dev/null 2>&1; then
-    docker rm -f "$PG_CONTAINER" 2>/dev/null || true
-    docker volume rm "${PG_CONTAINER}-data" 2>/dev/null || true
+
+  if command -v docker >/dev/null 2>&1 && docker inspect "$PG_CONTAINER" >/dev/null 2>&1; then
+    read -rp "删除 docker 容器 $PG_CONTAINER + volume？[y/N]: " _pg
+    if [[ "${_pg,,}" == "y" ]]; then
+      docker rm -f "$PG_CONTAINER" 2>/dev/null || true
+      docker volume rm "${PG_CONTAINER}-data" 2>/dev/null || true
+      echo "  ✅ docker pg 已清理"
+    fi
+  elif [[ -n "$PRE_DB_URL" ]]; then
+    read -rp "也从外部 Postgres 上删除 \`$PG_DB\` 数据库 + \`$PG_USER\` 用户？[y/N]: " _drop
+    if [[ "${_drop,,}" == "y" ]]; then
+      read -rp "  贴 admin URL（要 superuser 权限）: " ADMIN_URL
+      psql_run() {
+        if command -v psql >/dev/null 2>&1; then psql "$@"
+        else docker run --rm -i --network host postgres:16-alpine psql "$@"; fi
+      }
+      psql_run "$ADMIN_URL" -c "DROP DATABASE IF EXISTS \"$PG_DB\";" 2>/dev/null || true
+      psql_run "$ADMIN_URL" -c "DROP USER IF EXISTS \"$PG_USER\";" 2>/dev/null || true
+      echo "  ✅ 外部 pg 上 $PG_DB / $PG_USER 已删除"
+    fi
   fi
-  echo "✅ relay-master uninstalled"
+
+  # If /etc/relay-rs is empty after our cleanup, remove it too.
+  rmdir "$CONFIG_DIR" 2>/dev/null && echo "  · $CONFIG_DIR 已为空，一并清理"
+
+  echo "✅ relay-master 已卸载"
   exit 0
 fi
 
