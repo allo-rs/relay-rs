@@ -13,24 +13,24 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { createEnrollmentToken, type V1EnrollmentResp } from "@/lib/v1api";
+import { createEnrollmentToken, type EnrollmentResp } from "@/lib/api";
 
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
 
-export default function V1EnrollDialog({ open, onOpenChange }: Props) {
+export default function EnrollDialog({ open, onOpenChange }: Props) {
   const qc = useQueryClient();
   const [name, setName] = useState("");
-  const [resp, setResp] = useState<V1EnrollmentResp | null>(null);
+  const [resp, setResp] = useState<EnrollmentResp | null>(null);
   const [copied, setCopied] = useState(false);
 
   const mut = useMutation({
     mutationFn: () => createEnrollmentToken(name || `node-${Date.now()}`),
     onSuccess: (data) => {
       setResp(data);
-      qc.invalidateQueries({ queryKey: ["v1", "nodes"] });
+      qc.invalidateQueries({ queryKey: ["nodes"] });
     },
     onError: (e: Error) => toast.error(`生成失败：${e.message}`),
   });

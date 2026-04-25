@@ -121,7 +121,7 @@ function DiscourseSettingCard({ onChanged }: { onChanged: () => Promise<void> })
   const [configured, setConfigured] = useState(false);
   const [url, setUrl] = useState("");
   const [secret, setSecret] = useState("");
-  const [hasSecret, setHasSecret] = useState(false);
+  const [secretSet, setSecretSet] = useState(false);
 
   async function load() {
     setLoading(true);
@@ -129,7 +129,7 @@ function DiscourseSettingCard({ onChanged }: { onChanged: () => Promise<void> })
       const s = await getDiscourseSetting();
       setConfigured(s.configured);
       setUrl(s.url);
-      setHasSecret(s.hasSecret);
+      setSecretSet(s.secret_set);
       setSecret("");
     } catch (e) {
       toast.error(`读取失败: ${(e as Error).message}`);
@@ -147,7 +147,7 @@ function DiscourseSettingCard({ onChanged }: { onChanged: () => Promise<void> })
       toast.error("请填写 Discourse URL");
       return;
     }
-    if (!hasSecret && !secret.trim()) {
+    if (!secretSet && !secret.trim()) {
       toast.error("首次配置必须填写 secret");
       return;
     }
@@ -220,7 +220,7 @@ function DiscourseSettingCard({ onChanged }: { onChanged: () => Promise<void> })
             <div className="space-y-1.5">
               <Label htmlFor="discourse-secret">
                 SSO Secret{" "}
-                {hasSecret && (
+                {secretSet && (
                   <span className="text-xs text-muted-foreground font-normal">
                     （留空保持不变）
                   </span>
@@ -229,7 +229,7 @@ function DiscourseSettingCard({ onChanged }: { onChanged: () => Promise<void> })
               <Input
                 id="discourse-secret"
                 type="password"
-                placeholder={hasSecret ? "••••••••（不修改）" : "至少 10 字符"}
+                placeholder={secretSet ? "••••••••（不修改）" : "至少 10 字符"}
                 value={secret}
                 onChange={(e) => setSecret(e.target.value)}
                 disabled={saving}

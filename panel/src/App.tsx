@@ -2,8 +2,8 @@ import { Routes, Route, Navigate } from "react-router-dom";
 import Login from "@/pages/Login";
 import Overview from "@/pages/Overview";
 import Settings from "@/pages/Settings";
-import V1Nodes from "@/pages/V1Nodes";
-import V1Segments from "@/pages/V1Segments";
+import Nodes from "@/pages/Nodes";
+import Segments from "@/pages/Segments";
 import PrivateRoute from "@/routes/PrivateRoute";
 
 export default function App() {
@@ -13,8 +13,8 @@ export default function App() {
 
       <Route element={<PrivateRoute />}>
         <Route path="/"          element={<Overview />} />
-        <Route path="/nodes"     element={<V1Nodes />} />
-        <Route path="/segments"  element={<V1Segments />} />
+        <Route path="/nodes"     element={<Nodes />} />
+        <Route path="/segments"  element={<Segments />} />
         <Route path="/settings"  element={<Settings />} />
       </Route>
 

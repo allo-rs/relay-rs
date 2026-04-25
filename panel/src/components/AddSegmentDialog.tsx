@@ -12,16 +12,16 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { createV1Segment, type V1Node } from "@/lib/v1api";
+import { createSegment, type Node } from "@/lib/api";
 
 interface Props {
   open: boolean;
   onOpenChange: (v: boolean) => void;
   defaultNode?: string;
-  nodes: V1Node[];
+  nodes: Node[];
 }
 
-export default function V1AddSegmentDialog({
+export default function AddSegmentDialog({
   open,
   onOpenChange,
   defaultNode,
@@ -44,7 +44,7 @@ export default function V1AddSegmentDialog({
 
   const mut = useMutation({
     mutationFn: () =>
-      createV1Segment({
+      createSegment({
         node,
         listen,
         upstream,
@@ -52,7 +52,7 @@ export default function V1AddSegmentDialog({
       }),
     onSuccess: () => {
       toast.success("已创建 segment，master 已推送给节点");
-      qc.invalidateQueries({ queryKey: ["v1", "segments"] });
+      qc.invalidateQueries({ queryKey: ["segments"] });
       onOpenChange(false);
     },
     onError: (e: Error) => toast.error(`创建失败：${e.message}`),

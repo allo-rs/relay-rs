@@ -23,15 +23,15 @@ import {
 } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import ConfirmDialog from "@/components/ConfirmDialog";
-import V1AddSegmentDialog from "@/components/V1AddSegmentDialog";
+import AddSegmentDialog from "@/components/AddSegmentDialog";
 import {
-  listV1Segments,
-  deleteV1Segment,
-  listV1Nodes,
-  type V1Segment,
-} from "@/lib/v1api";
+  listSegments,
+  deleteSegment,
+  listNodes,
+  type Segment,
+} from "@/lib/api";
 
-function nextTarget(s: V1Segment): string {
+function nextTarget(s: Segment): string {
   if (s.next_kind === "upstream" && s.upstream_host) {
     const p =
       s.upstream_port_end && s.upstream_port_end !== s.upstream_port_start
@@ -45,27 +45,27 @@ function nextTarget(s: V1Segment): string {
   return "?";
 }
 
-export default function V1Segments() {
+export default function Segments() {
   const qc = useQueryClient();
   const [params, setParams] = useSearchParams();
   const nodeFilter = params.get("node") || "";
   const [addOpen, setAddOpen] = useState(false);
-  const [delTarget, setDelTarget] = useState<V1Segment | null>(null);
+  const [delTarget, setDelTarget] = useState<Segment | null>(null);
 
-  const nodesQ = useQuery({ queryKey: ["v1", "nodes"], queryFn: listV1Nodes });
+  const nodesQ = useQuery({ queryKey: ["nodes"], queryFn: listNodes });
 
   const { data, isLoading, error, refetch, isFetching } = useQuery({
-    queryKey: ["v1", "segments", nodeFilter],
-    queryFn: () => listV1Segments(nodeFilter || undefined),
+    queryKey: ["segments", nodeFilter],
+    queryFn: () => listSegments(nodeFilter || undefined),
     refetchInterval: 30_000,
   });
 
   const delMut = useMutation({
-    mutationFn: (id: string) => deleteV1Segment(id),
+    mutationFn: (id: string) => deleteSegment(id),
     onSuccess: () => {
       toast.success("已删除");
-      qc.invalidateQueries({ queryKey: ["v1", "segments"] });
-      qc.invalidateQueries({ queryKey: ["v1", "nodes"] });
+      qc.invalidateQueries({ queryKey: ["segments"] });
+      qc.invalidateQueries({ queryKey: ["nodes"] });
       setDelTarget(null);
     },
     onError: (e: Error) => toast.error(`删除失败：${e.message}`),
@@ -73,7 +73,7 @@ export default function V1Segments() {
 
   return (
     <PageShell
-      title="Segments (v1)"
+      title="转发段"
       subtitle="单口 TCP / UDP 转发规则 · 修改后 master 通过 LISTEN/NOTIFY 秒级推给 node"
       actions={
         <>
@@ -192,7 +192,7 @@ export default function V1Segments() {
         </Card>
       )}
 
-      <V1AddSegmentDialog
+      <AddSegmentDialog
         open={addOpen}
         onOpenChange={setAddOpen}
         defaultNode={nodeFilter || undefined}

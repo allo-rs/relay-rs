@@ -1,211 +1,103 @@
-// API 请求封装，使用原生 fetch + HttpOnly cookie
+// Panel admin API。所有路径以 /api/... 为主，鉴权复用 /api/auth/*
+// 所有请求依赖 HttpOnly cookie（Discourse SSO 签发的 relay_token）
 
-import type {
-  NodeInfo,
-  NodeRules,
-  ForwardRule,
-  BlockRule,
-  OkResponse,
-} from "./types";
-
-// 统一请求封装，携带 cookie，401 时抛错由调用方处理
-async function apiFetch<T>(url: string, options: RequestInit = {}): Promise<T> {
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    ...(options.headers as Record<string, string>),
-  };
-
+async function apiFetch<T>(url: string, init: RequestInit = {}): Promise<T> {
   const res = await fetch(url, {
-    ...options,
-    headers,
+    ...init,
     credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      ...(init.headers as Record<string, string>),
+    },
   });
 
   if (res.status === 401) {
-    // 触发全局未登录处理
     window.dispatchEvent(new CustomEvent("app:unauthorized"));
     throw new Error("未登录或会话已过期");
   }
 
   if (!res.ok) {
-    let message = `请求失败 (${res.status})`;
+    let msg = `请求失败 (${res.status})`;
     try {
       const data = await res.json();
-      if (typeof data === "object" && data !== null && "message" in data) {
-        message = String((data as { message: unknown }).message);
-      } else if (typeof data === "object" && data !== null && "error" in data) {
-        message = String((data as { error: unknown }).error);
+      if (typeof data === "object" && data !== null) {
+        if ("error" in data) msg = String((data as { error: unknown }).error);
+        else if ("message" in data) msg = String((data as { message: unknown }).message);
       }
     } catch {
-      // 忽略解析错误
+      /* ignore */
     }
-    throw new Error(message);
+    throw new Error(msg);
   }
 
-  return res.json() as Promise<T>;
+  if (res.status === 204) return undefined as T;
+  return (await res.json()) as T;
 }
 
-// 登录流程已改为 Discourse Connect（见 lib/auth.ts）——此处不再保留 login API。
-
-interface RawNodeStatus {
-  ok?: boolean;
-  version?: string;
-  mode?: string;
-}
-
-interface RawNodeItem {
-  id: number;
+// ── 类型定义 ─────────────────────────────────────────────
+export interface Node {
+  id: string;
   name: string;
-  url: string;
-  status?: RawNodeStatus | null;
+  status: string;
+  session_epoch: number;
+  applied_revision: number;
+  desired_revision: number;
+  last_seen: string | null;
 }
 
-interface NodeListResponse {
-  ok: true;
-  nodes: RawNodeItem[];
+export interface Segment {
+  id: string;
+  chain_id: string;
+  node_id: string;
+  listen: string;
+  proto: string;
+  ipv6: boolean;
+  next_kind: string; // "upstream" | "node"
+  next_segment_id: string | null;
+  upstream_host: string | null;
+  upstream_port_start: number | null;
+  upstream_port_end: number | null;
+  comment: string | null;
 }
 
-// 获取所有节点列表（仅 DB 数据，状态由 NodeCard 异步获取）
-export function getNodes(): Promise<NodeInfo[]> {
-  return apiFetch<NodeListResponse>("/api/nodes").then((res) =>
-    res.nodes.map((n) => ({
-      id: n.id,
-      name: n.name,
-      url: n.url,
-      online: n.status?.ok === true,
-      version: n.status?.version,
-      mode: n.status?.mode as NodeInfo["mode"] | undefined,
-    }))
-  );
-}
-
-// 单独探活一个节点
-export function getNodeStatus(id: number): Promise<{
-  online: boolean;
-  version?: string;
-  mode?: NodeInfo["mode"];
-}> {
-  return apiFetch<RawNodeStatus>(`/api/nodes/${id}/status`)
-    .then((s) => ({
-      online: s.ok === true,
-      version: s.version,
-      mode: s.mode as NodeInfo["mode"] | undefined,
-    }))
-    .catch(() => ({ online: false }));
-}
-
-// 获取指定节点的规则
-export function getNodeRules(id: number): Promise<NodeRules> {
-  return apiFetch<NodeRules>(`/api/nodes/${id}/rules`);
-}
-
-// 全量替换节点规则
-export function putNodeRules(id: number, rules: NodeRules): Promise<OkResponse> {
-  return apiFetch<OkResponse>(`/api/nodes/${id}/rules`, {
-    method: "PUT",
-    body: JSON.stringify(rules),
-  });
-}
-
-// 添加转发规则
-export function addForwardRule(id: number, rule: ForwardRule): Promise<OkResponse> {
-  return apiFetch<OkResponse>(`/api/nodes/${id}/rules/forward`, {
-    method: "POST",
-    body: JSON.stringify(rule),
-  });
-}
-
-// 删除转发规则
-export function deleteForwardRule(id: number, idx: number): Promise<OkResponse> {
-  return apiFetch<OkResponse>(`/api/nodes/${id}/rules/forward/${idx}`, {
-    method: "DELETE",
-  });
-}
-
-// 添加防火墙规则
-export function addBlockRule(id: number, rule: BlockRule): Promise<OkResponse> {
-  return apiFetch<OkResponse>(`/api/nodes/${id}/rules/block`, {
-    method: "POST",
-    body: JSON.stringify(rule),
-  });
-}
-
-// 删除防火墙规则
-export function deleteBlockRule(id: number, idx: number): Promise<OkResponse> {
-  return apiFetch<OkResponse>(`/api/nodes/${id}/rules/block/${idx}`, {
-    method: "DELETE",
-  });
-}
-
-// 获取流量统计
-export function getStats(id: number): Promise<unknown> {
-  return apiFetch<unknown>(`/api/nodes/${id}/stats`);
-}
-
-// 重载节点规则
-export function reloadNode(id: number): Promise<OkResponse> {
-  return apiFetch<OkResponse>(`/api/nodes/${id}/reload`, {
-    method: "POST",
-  });
-}
-
-export interface AddNodePayload {
-  name: string;
-  url: string;
-}
-
-export interface AddNodeResponse {
-  ok: true;
-  pubkey: string;
-}
-
-export function addNode(payload: AddNodePayload): Promise<AddNodeResponse> {
-  return apiFetch<AddNodeResponse>("/api/nodes", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-}
-
-export function deleteNode(id: number): Promise<OkResponse> {
-  return apiFetch<OkResponse>(`/api/nodes/${id}`, {
-    method: "DELETE",
-  });
-}
-
-export interface AggregatedForward {
-  node_id: number;
+export interface EnrollmentResp {
+  token: string;
   node_name: string;
-  node_online: boolean;
-  idx: number | null;
-  rule: ForwardRule | null;
+  install_cmd: string;
 }
 
-export interface ForwardsNodeSummary {
-  id: number;
-  name: string;
-  online: boolean;
-  rule_count: number;
-}
+// ── Nodes ────────────────────────────────────────────────
+export const listNodes = () => apiFetch<Node[]>("/api/nodes");
+export const deleteNode = (id: string) =>
+  apiFetch<void>(`/api/nodes/${encodeURIComponent(id)}`, { method: "DELETE" });
 
-export interface ForwardsAggregate {
-  nodes: ForwardsNodeSummary[];
-  items: AggregatedForward[];
-}
+// ── Segments ─────────────────────────────────────────────
+export const listSegments = (nodeId?: string) => {
+  const q = nodeId ? `?node=${encodeURIComponent(nodeId)}` : "";
+  return apiFetch<Segment[]>(`/api/segments${q}`);
+};
 
-interface ForwardsAggregateResponse {
-  ok: true;
-  nodes: ForwardsNodeSummary[];
-  items: AggregatedForward[];
+export interface SegmentCreate {
+  node: string;
+  listen: string;
+  upstream: string;
+  chain?: string;
+  proto?: string;
+  ipv6?: boolean;
+  comment?: string;
 }
+export const createSegment = (body: SegmentCreate) =>
+  apiFetch<Segment>("/api/segments", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 
-// 跨所有节点聚合的转发规则（同时返回节点概况供选择器 / 离线提示）
-export function getAllForwards(): Promise<ForwardsAggregate> {
-  return apiFetch<ForwardsAggregateResponse>("/api/forwards").then((r) => ({
-    nodes: r.nodes ?? [],
-    items: r.items ?? [],
-  }));
-}
+export const deleteSegment = (id: string) =>
+  apiFetch<void>(`/api/segments/${encodeURIComponent(id)}`, { method: "DELETE" });
 
-export function getMasterPubkey(): Promise<{ pubkey: string }> {
-  return apiFetch<{ pubkey: string }>("/api/pubkey");
-}
+// ── Enrollment tokens ────────────────────────────────────
+export const createEnrollmentToken = (name: string) =>
+  apiFetch<EnrollmentResp>("/api/enrollment-tokens", {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });

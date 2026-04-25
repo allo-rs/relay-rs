@@ -15,8 +15,8 @@ import {
 } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import ConfirmDialog from "@/components/ConfirmDialog";
-import V1EnrollDialog from "@/components/V1EnrollDialog";
-import { listV1Nodes, deleteV1Node, type V1Node } from "@/lib/v1api";
+import EnrollDialog from "@/components/EnrollDialog";
+import { listNodes, deleteNode, type Node } from "@/lib/api";
 
 function StatusBadge({ status }: { status: string }) {
   const color =
@@ -39,23 +39,23 @@ function formatTime(t: string | null): string {
   }
 }
 
-export default function V1Nodes() {
+export default function Nodes() {
   const qc = useQueryClient();
   const [enrollOpen, setEnrollOpen] = useState(false);
-  const [delTarget, setDelTarget] = useState<V1Node | null>(null);
+  const [delTarget, setDelTarget] = useState<Node | null>(null);
 
   const { data, isLoading, error, refetch, isFetching } = useQuery({
-    queryKey: ["v1", "nodes"],
-    queryFn: listV1Nodes,
+    queryKey: ["nodes"],
+    queryFn: listNodes,
     refetchInterval: 30_000,
   });
 
   const delMut = useMutation({
-    mutationFn: (id: string) => deleteV1Node(id),
+    mutationFn: (id: string) => deleteNode(id),
     onSuccess: () => {
       toast.success("节点已删除");
-      qc.invalidateQueries({ queryKey: ["v1", "nodes"] });
-      qc.invalidateQueries({ queryKey: ["v1", "segments"] });
+      qc.invalidateQueries({ queryKey: ["nodes"] });
+      qc.invalidateQueries({ queryKey: ["segments"] });
       setDelTarget(null);
     },
     onError: (e: Error) => toast.error(`删除失败：${e.message}`),
@@ -63,7 +63,7 @@ export default function V1Nodes() {
 
   return (
     <PageShell
-      title="节点 (v1)"
+      title="节点"
       subtitle="mTLS 注册的 relay-node 列表 · 同步状态、hash 一致性"
       actions={
         <>
@@ -142,7 +142,7 @@ export default function V1Nodes() {
                   </div>
                   <div className="flex items-center justify-between pt-2">
                     <Link
-                      to={`/v1/segments?node=${encodeURIComponent(n.id)}`}
+                      to={`/segments?node=${encodeURIComponent(n.id)}`}
                       className="text-xs text-primary hover:underline"
                     >
                       查看 segments →
@@ -163,7 +163,7 @@ export default function V1Nodes() {
         </div>
       )}
 
-      <V1EnrollDialog open={enrollOpen} onOpenChange={setEnrollOpen} />
+      <EnrollDialog open={enrollOpen} onOpenChange={setEnrollOpen} />
 
       <ConfirmDialog
         open={!!delTarget}
