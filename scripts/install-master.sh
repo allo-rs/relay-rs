@@ -231,14 +231,21 @@ if [[ "$ACTION" == "uninstall" ]]; then
   elif [[ -n "$PRE_DB_URL" ]]; then
     read -rp "也从外部 Postgres 上删除 \`$PG_DB\` 数据库 + \`$PG_USER\` 用户？[y/N]: " _drop
     if [[ "${_drop,,}" == "y" ]]; then
-      read -rp "  贴 admin URL（要 superuser 权限）: " ADMIN_URL
-      psql_run() {
-        if command -v psql >/dev/null 2>&1; then psql "$@"
-        else docker run --rm -i --network host postgres:16-alpine psql "$@"; fi
-      }
-      psql_run "$ADMIN_URL" -c "DROP DATABASE IF EXISTS \"$PG_DB\";" 2>/dev/null || true
-      psql_run "$ADMIN_URL" -c "DROP USER IF EXISTS \"$PG_USER\";" 2>/dev/null || true
-      echo "  ✅ 外部 pg 上 $PG_DB / $PG_USER 已删除"
+      ADMIN_HOSTPORT=$(printf '%s' "$PRE_DB_URL" | sed -E 's|.*@([^/?]+).*|\1|')
+      read -rp "  pg 管理员账号 [postgres]: " _au; ADMIN_USER="${_au:-postgres}"
+      read -rsp "  $ADMIN_USER 密码 (留空跳过): " ADMIN_PASS; echo
+      if [[ -z "$ADMIN_PASS" ]]; then
+        echo "  · 跳过外部 pg 清理"
+      else
+        ADMIN_URL="postgresql://$ADMIN_USER:$ADMIN_PASS@$ADMIN_HOSTPORT/postgres"
+        psql_run() {
+          if command -v psql >/dev/null 2>&1; then psql "$@"
+          else docker run --rm -i --network host postgres:16-alpine psql "$@"; fi
+        }
+        psql_run "$ADMIN_URL" -c "DROP DATABASE IF EXISTS \"$PG_DB\";" 2>/dev/null || true
+        psql_run "$ADMIN_URL" -c "DROP USER IF EXISTS \"$PG_USER\";" 2>/dev/null || true
+        echo "  ✅ 外部 pg 上 $PG_DB / $PG_USER 已删除"
+      fi
     fi
   fi
 
