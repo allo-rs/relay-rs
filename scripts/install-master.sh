@@ -175,6 +175,16 @@ if [[ -n "${DATABASE_URL:-}" ]] && command -v psql >/dev/null 2>&1; then
   fi
 fi
 
+# Recover DATABASE_URL from a previous (interrupted) install
+if ! $PG_OK && [[ -z "${DATABASE_URL:-}" && -f "$ENV_FILE" ]]; then
+  PREV_URL=$(grep -E '^DATABASE_URL=' "$ENV_FILE" 2>/dev/null | head -n1 | cut -d= -f2-)
+  if [[ -n "$PREV_URL" ]]; then
+    DATABASE_URL="$PREV_URL"
+    echo "▶ Reusing DATABASE_URL from $ENV_FILE"
+    PG_OK=true
+  fi
+fi
+
 if ! $PG_OK; then
   if command -v docker >/dev/null 2>&1; then
     echo "▶ Provisioning Postgres via Docker..."
@@ -182,21 +192,47 @@ if ! $PG_OK; then
     if docker inspect "$PG_CONTAINER" >/dev/null 2>&1; then
       echo "  · container '$PG_CONTAINER' already exists, reusing"
       docker start "$PG_CONTAINER" >/dev/null 2>&1 || true
-      if [[ -z "${DATABASE_URL:-}" ]]; then
-        read -rp "Existing container detected — please paste its DATABASE_URL: " DATABASE_URL
-        [[ -z "$DATABASE_URL" ]] && { echo "DATABASE_URL required"; exit 1; }
+      # Recover credentials from the container's env (we set them at create time)
+      PG_USER_FROM_CT=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$PG_CONTAINER" \
+        | sed -n 's/^POSTGRES_USER=//p' | head -n1)
+      PG_PASS_FROM_CT=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$PG_CONTAINER" \
+        | sed -n 's/^POSTGRES_PASSWORD=//p' | head -n1)
+      PG_DB_FROM_CT=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$PG_CONTAINER" \
+        | sed -n 's/^POSTGRES_DB=//p' | head -n1)
+      PG_PORT_FROM_CT=$(docker inspect -f '{{(index (index .NetworkSettings.Ports "5432/tcp") 0).HostPort}}' "$PG_CONTAINER" 2>/dev/null || echo "5432")
+      if [[ -n "$PG_USER_FROM_CT" && -n "$PG_PASS_FROM_CT" && -n "$PG_DB_FROM_CT" ]]; then
+        DATABASE_URL="postgresql://$PG_USER_FROM_CT:$PG_PASS_FROM_CT@127.0.0.1:$PG_PORT_FROM_CT/$PG_DB_FROM_CT"
+        echo "  · recovered DATABASE_URL from container env"
+      else
+        echo "❌ Could not recover credentials from container '$PG_CONTAINER'."
+        echo "   Either remove it (docker rm -f $PG_CONTAINER) or pass DATABASE_URL=... and rerun."
+        exit 1
       fi
     else
+      # Pick a free host port — 5432 may already be taken by another postgres
+      PG_HOST_PORT=5432
+      if ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${PG_HOST_PORT}\$"; then
+        echo "  · port 5432 is busy on host, picking 25432 instead"
+        PG_HOST_PORT=25432
+        if ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${PG_HOST_PORT}\$"; then
+          echo "❌ Both 5432 and 25432 are busy. Please free a port or pass DATABASE_URL=..."
+          exit 1
+        fi
+      fi
       PG_PASS=$(openssl rand -hex 16)
       docker volume create "${PG_CONTAINER}-data" >/dev/null
-      docker run -d --name "$PG_CONTAINER" \
+      if ! docker run -d --name "$PG_CONTAINER" \
         --restart unless-stopped \
         -e POSTGRES_DB="$PG_DB" \
         -e POSTGRES_USER="$PG_USER" \
         -e POSTGRES_PASSWORD="$PG_PASS" \
-        -p 127.0.0.1:5432:5432 \
+        -p 127.0.0.1:$PG_HOST_PORT:5432 \
         -v "${PG_CONTAINER}-data:/var/lib/postgresql/data" \
-        postgres:16-alpine >/dev/null
+        postgres:16-alpine >/dev/null; then
+        echo "❌ Failed to start Postgres container."
+        docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
+        exit 1
+      fi
       echo "  · waiting for Postgres to become ready..."
       for _ in $(seq 1 30); do
         if docker exec "$PG_CONTAINER" pg_isready -U "$PG_USER" -d "$PG_DB" >/dev/null 2>&1; then
@@ -204,7 +240,7 @@ if ! $PG_OK; then
         fi
         sleep 1
       done
-      DATABASE_URL="postgresql://$PG_USER:$PG_PASS@127.0.0.1:5432/$PG_DB"
+      DATABASE_URL="postgresql://$PG_USER:$PG_PASS@127.0.0.1:$PG_HOST_PORT/$PG_DB"
     fi
     PG_OK=true
   else
