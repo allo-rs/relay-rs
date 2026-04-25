@@ -72,6 +72,20 @@ case "${CHOICE:-0}" in
   *) echo "无效选项"; exit 1 ;;
 esac
 
+# Detect & offer to disable the old v0 single-binary service which occupies
+# panel port 9090 and confuses the operator.
+if [[ "$ACTION" == "install" ]] && systemctl list-unit-files 2>/dev/null | grep -q '^relay-rs\.service'; then
+  echo ""
+  echo "⚠️  检测到旧版 v0 服务 relay-rs.service 还在系统里（与 v2 不兼容）"
+  read -rp "   停止并禁用旧服务？[Y/n]: " _v0
+  if [[ "${_v0,,}" != "n" ]]; then
+    systemctl disable --now relay-rs 2>/dev/null || true
+    rm -f /etc/systemd/system/relay-rs.service /usr/local/bin/relay-rs
+    systemctl daemon-reload
+    echo "   ✅ 旧 v0 已清理"
+  fi
+fi
+
 # Confirm reinstall on top of an existing install
 if $IS_INSTALLED && [[ "$ACTION" == "install" ]]; then
   echo ""
@@ -201,6 +215,21 @@ echo "▶ gRPC server cert SAN: $HOSTNAME"
 # ── Postgres setup ───────────────────────────────────────────────
 NEEDS_DOCKER=false
 PG_OK=false
+
+# Fresh install path explicitly nukes any leftover relay-postgres container
+# AND its volume so docker init runs cleanly with our freshly generated password.
+# Without this, an old volume keeps the previous password and POSTGRES_PASSWORD
+# is silently ignored on subsequent runs.
+if command -v docker >/dev/null 2>&1 && [[ -z "${DATABASE_URL:-}" ]]; then
+  if docker inspect "$PG_CONTAINER" >/dev/null 2>&1 || docker volume inspect "${PG_CONTAINER}-data" >/dev/null 2>&1; then
+    echo "▶ 检测到旧的 $PG_CONTAINER 容器/volume —— 全新安装会清理它们"
+    read -rp "  继续清理并重建？[Y/n]: " _wipe
+    if [[ "${_wipe,,}" != "n" ]]; then
+      docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
+      docker volume rm "${PG_CONTAINER}-data" >/dev/null 2>&1 || true
+    fi
+  fi
+fi
 
 if [[ -n "${DATABASE_URL:-}" ]] && command -v psql >/dev/null 2>&1; then
   if psql "$DATABASE_URL" -c 'SELECT 1' >/dev/null 2>&1; then
