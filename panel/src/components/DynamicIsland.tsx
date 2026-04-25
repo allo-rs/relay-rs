@@ -1,14 +1,12 @@
 import { NavLink, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard,
-  ArrowRightLeft,
   Server,
   Settings as SettingsIcon,
   LogOut,
   ShieldCheck,
   Sun,
   Moon,
-  Zap,
   Network,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -24,12 +22,10 @@ type NavItem = {
 };
 
 const NAV_ITEMS: NavItem[] = [
-  { to: "/",             label: "概览",   icon: LayoutDashboard, end: true },
-  { to: "/forwards",     label: "转发",   icon: ArrowRightLeft },
-  { to: "/nodes",        label: "节点",   icon: Server },
-  { to: "/v1/nodes",     label: "v1 节点", icon: Zap },
-  { to: "/v1/segments",  label: "v1 段",  icon: Network },
-  { to: "/settings",     label: "设置",   icon: SettingsIcon },
+  { to: "/",          label: "概览",   icon: LayoutDashboard, end: true },
+  { to: "/nodes",     label: "节点",   icon: Server },
+  { to: "/segments",  label: "转发段", icon: Network },
+  { to: "/settings",  label: "设置",   icon: SettingsIcon },
 ];
 
 const btnCls = cn(
