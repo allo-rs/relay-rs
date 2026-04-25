@@ -2,7 +2,7 @@
 # relay-master installer / updater / uninstaller
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/allo-rs/relay-rs/main/scripts/install-master.sh | bash
+#   curl -fsSL "https://raw.githubusercontent.com/allo-rs/relay-rs/main/scripts/install-master.sh?$(date +%s)" | bash
 #
 # Optional environment variables:
 #   VERSION        Pin a release tag (default: latest)

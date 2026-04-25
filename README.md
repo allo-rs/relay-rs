@@ -20,7 +20,7 @@
 ### 1. 安装 master
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/allo-rs/relay-rs/main/scripts/install-master.sh | bash
+curl -fsSL "https://raw.githubusercontent.com/allo-rs/relay-rs/main/scripts/install-master.sh?$(date +%s)" | bash
 ```
 
 安装脚本会下载 `relay-master` 二进制、自动创建 Postgres 数据库（通过 Docker，或复用已有的 `DATABASE_URL`）、生成 CA、写入 `/etc/relay-rs/relay-master.env`，并启动 `relay-master.service`。
