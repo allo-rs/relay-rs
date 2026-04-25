@@ -2312,7 +2312,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "relay-master"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -2350,7 +2350,7 @@ dependencies = [
 
 [[package]]
 name = "relay-node"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -2376,7 +2376,7 @@ dependencies = [
 
 [[package]]
 name = "relay-proto"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "prost",
  "protox",
@@ -2387,7 +2387,7 @@ dependencies = [
 
 [[package]]
 name = "relay-rs"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "axum",
  "axum-server",

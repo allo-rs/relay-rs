@@ -50,6 +50,7 @@ pub async fn begin_session(
                 session_epoch     = $2,
                 version           = $3,
                 ca_bundle_version = $4,
+                status            = 'ok',
                 last_seen         = NOW(),
                 updated_at        = NOW()
           WHERE id = $1
