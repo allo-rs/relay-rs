@@ -269,6 +269,10 @@ if ! $PG_OK; then
           fi
           sleep 1
         done
+        # Reused volumes keep their initial password; force-sync it via the
+        # container's local unix socket (peer-trust) so we don't get locked out.
+        docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" \
+          -c "ALTER USER \"$PG_USER\" WITH PASSWORD '$PG_PASS';" >/dev/null 2>&1 || true
         DATABASE_URL="postgresql://$PG_USER:$PG_PASS@127.0.0.1:5432/$PG_DB"
       fi
     fi
