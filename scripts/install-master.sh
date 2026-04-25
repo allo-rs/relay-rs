@@ -209,38 +209,44 @@ if ! $PG_OK; then
         exit 1
       fi
     else
-      # Pick a free host port — 5432 may already be taken by another postgres
-      PG_HOST_PORT=5432
-      if ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${PG_HOST_PORT}\$"; then
-        echo "  · port 5432 is busy on host, picking 25432 instead"
-        PG_HOST_PORT=25432
-        if ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${PG_HOST_PORT}\$"; then
-          echo "❌ Both 5432 and 25432 are busy. Please free a port or pass DATABASE_URL=..."
+      # Pick a free host port — if 5432 is busy, ask the operator instead
+      # of silently spinning up a second postgres on a different port.
+      if ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "[:.]5432\$"; then
+        echo "  · port 5432 is already in use (another Postgres is running)."
+        echo "    The installer will not start a second one."
+        read -rp "Paste DATABASE_URL pointing to the existing Postgres (e.g. postgresql://user:pass@127.0.0.1:5432/relay): " DATABASE_URL
+        [[ -z "$DATABASE_URL" ]] && { echo "DATABASE_URL required"; exit 1; }
+        if command -v psql >/dev/null 2>&1; then
+          if ! psql "$DATABASE_URL" -c 'SELECT 1' >/dev/null 2>&1; then
+            echo "❌ Cannot connect to provided DATABASE_URL"; exit 1
+          fi
+        fi
+        NEEDS_DOCKER=false
+        PG_OK=true
+      else
+        PG_PASS=$(openssl rand -hex 16)
+        docker volume create "${PG_CONTAINER}-data" >/dev/null
+        if ! docker run -d --name "$PG_CONTAINER" \
+          --restart unless-stopped \
+          -e POSTGRES_DB="$PG_DB" \
+          -e POSTGRES_USER="$PG_USER" \
+          -e POSTGRES_PASSWORD="$PG_PASS" \
+          -p 127.0.0.1:5432:5432 \
+          -v "${PG_CONTAINER}-data:/var/lib/postgresql/data" \
+          postgres:16-alpine >/dev/null; then
+          echo "❌ Failed to start Postgres container."
+          docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
           exit 1
         fi
+        echo "  · waiting for Postgres to become ready..."
+        for _ in $(seq 1 30); do
+          if docker exec "$PG_CONTAINER" pg_isready -U "$PG_USER" -d "$PG_DB" >/dev/null 2>&1; then
+            break
+          fi
+          sleep 1
+        done
+        DATABASE_URL="postgresql://$PG_USER:$PG_PASS@127.0.0.1:5432/$PG_DB"
       fi
-      PG_PASS=$(openssl rand -hex 16)
-      docker volume create "${PG_CONTAINER}-data" >/dev/null
-      if ! docker run -d --name "$PG_CONTAINER" \
-        --restart unless-stopped \
-        -e POSTGRES_DB="$PG_DB" \
-        -e POSTGRES_USER="$PG_USER" \
-        -e POSTGRES_PASSWORD="$PG_PASS" \
-        -p 127.0.0.1:$PG_HOST_PORT:5432 \
-        -v "${PG_CONTAINER}-data:/var/lib/postgresql/data" \
-        postgres:16-alpine >/dev/null; then
-        echo "❌ Failed to start Postgres container."
-        docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
-        exit 1
-      fi
-      echo "  · waiting for Postgres to become ready..."
-      for _ in $(seq 1 30); do
-        if docker exec "$PG_CONTAINER" pg_isready -U "$PG_USER" -d "$PG_DB" >/dev/null 2>&1; then
-          break
-        fi
-        sleep 1
-      done
-      DATABASE_URL="postgresql://$PG_USER:$PG_PASS@127.0.0.1:$PG_HOST_PORT/$PG_DB"
     fi
     PG_OK=true
   else
