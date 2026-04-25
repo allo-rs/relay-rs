@@ -357,3 +357,22 @@ async fn connect() -> Result<PgPool> {
         .context("需要 DATABASE_URL 环境变量")?;
     db::connect(&url).await
 }
+
+pub async fn discourse_set(url: &str, secret: &str) -> Result<()> {
+    let pool = connect().await?;
+    let value = serde_json::json!({ "url": url, "secret": secret });
+    crate::panel::settings::put_setting(&pool, "discourse", &value).await?;
+    println!("✓ Discourse SSO 配置已写入 v1_settings.discourse (url={})", url);
+    println!("  master daemon 会在 30s 内自动重载，或重启 relay-master 立即生效");
+    Ok(())
+}
+
+pub async fn discourse_unset() -> Result<()> {
+    let pool = connect().await?;
+    sqlx::query("DELETE FROM v1_settings WHERE key = 'discourse'")
+        .execute(&pool)
+        .await
+        .context("删除 v1_settings.discourse 失败")?;
+    println!("✓ Discourse SSO 配置已清除");
+    Ok(())
+}

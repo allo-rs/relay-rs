@@ -8,6 +8,6 @@ mod assets;
 mod auth;
 mod discourse;
 mod server;
-mod settings;
+pub mod settings;
 
 pub use server::run;

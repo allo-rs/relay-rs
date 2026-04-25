@@ -456,6 +456,31 @@ if ! systemctl is-active --quiet "$SERVICE_NAME"; then
   exit 1
 fi
 
+# ── Discourse SSO bootstrap (optional) ───────────────────────────
+echo ""
+echo "─── Discourse SSO 配置（可选） ───"
+echo "面板登录走 Discourse Connect。如果不配，访问面板会得到"
+echo "  {\"error\":\"未配置 Discourse SSO\"}。"
+echo "可以先跳过，事后再用 \`relay-master discourse-set --url ...\` 设置。"
+read -rp "现在配置 Discourse SSO？[y/N]: " _disc
+if [[ "${_disc,,}" == "y" ]]; then
+  read -rp "  Discourse 站点 URL (如 https://forum.example.com): " DISCOURSE_URL
+  if [[ -n "$DISCOURSE_URL" ]]; then
+    read -rsp "  Discourse SSO secret (回车确认，不会显示): " DISCOURSE_SECRET
+    echo
+    if [[ -n "$DISCOURSE_SECRET" ]]; then
+      # 走 stdin 不走 argv，避免 /proc/cmdline 泄露
+      if ( set -a; . "$ENV_FILE"; set +a; \
+           printf '%s' "$DISCOURSE_SECRET" | "$INSTALL_BIN" discourse-set --url "$DISCOURSE_URL" ); then
+        echo "  ✅ Discourse SSO 已配置"
+      else
+        echo "  ⚠️  写入失败，可稍后手动: $INSTALL_BIN discourse-set --url <URL> < <(echo -n <SECRET>)"
+      fi
+    fi
+    unset DISCOURSE_SECRET
+  fi
+fi
+
 # ── Export CA bundle ─────────────────────────────────────────────
 CA_B64=$(RELAY_MASTER_CA_DIR="$CA_DIR" "$INSTALL_BIN" ca-show --base64)
 echo "$CA_B64" > "$CONFIG_DIR/relay-ca.b64"

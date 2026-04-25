@@ -101,6 +101,19 @@ enum Command {
         #[arg(long)]
         id: String,
     },
+    /// 配置 Discourse SSO（写入 v1_settings.discourse）
+    ///
+    /// 出于安全考虑 secret 必须从 stdin 读取，避免 argv 泄露到 /proc/<pid>/cmdline。
+    DiscourseSet {
+        /// Discourse 站点 URL（如 https://forum.example.com）
+        #[arg(long)]
+        url: String,
+        /// 从 stdin 读取 SSO secret（去掉首尾空白）
+        #[arg(long, default_value_t = true)]
+        secret_stdin: bool,
+    },
+    /// 清除 Discourse SSO 配置
+    DiscourseUnset,
 }
 
 fn main() -> Result<()> {
@@ -153,6 +166,23 @@ fn main() -> Result<()> {
         )),
         Command::SegList { node } => admin_rt().block_on(admin::seg_list(node)),
         Command::SegRm { id } => admin_rt().block_on(admin::seg_rm(&id)),
+        Command::DiscourseSet { url, secret_stdin: _ } => {
+            // 始终从 stdin 读 secret —— argv/--secret 一律不接，防止 /proc/cmdline 泄露
+            use std::io::Read;
+            let mut secret = String::new();
+            std::io::stdin()
+                .read_to_string(&mut secret)
+                .context("从 stdin 读取 Discourse SSO secret 失败")?;
+            let secret = secret.trim().to_string();
+            if secret.is_empty() {
+                anyhow::bail!("从 stdin 读到空 secret，已中止");
+            }
+            if url.trim().is_empty() {
+                anyhow::bail!("--url 不能为空");
+            }
+            admin_rt().block_on(admin::discourse_set(&url, &secret))
+        }
+        Command::DiscourseUnset => admin_rt().block_on(admin::discourse_unset()),
     }
 }
 
