@@ -72,17 +72,30 @@ case "${CHOICE:-0}" in
   *) echo "无效选项"; exit 1 ;;
 esac
 
-# Detect & offer to disable the old v0 single-binary service which occupies
-# panel port 9090 and confuses the operator.
-if [[ "$ACTION" == "install" ]] && systemctl list-unit-files 2>/dev/null | grep -q '^relay-rs\.service'; then
-  echo ""
-  echo "⚠️  检测到旧版 v0 服务 relay-rs.service 还在系统里（与 v2 不兼容）"
-  read -rp "   停止并禁用旧服务？[Y/n]: " _v0
-  if [[ "${_v0,,}" != "n" ]]; then
-    systemctl disable --now relay-rs 2>/dev/null || true
-    rm -f /etc/systemd/system/relay-rs.service /usr/local/bin/relay-rs
-    systemctl daemon-reload
-    echo "   ✅ 旧 v0 已清理"
+# Detect & offer to disable old v0 single-binary services that occupy
+# panel/grpc ports and confuse the operator. v0 shipped two unit names
+# (relay-rs.service early, then relay-rs-master.service + relay-rs-node.service later).
+if [[ "$ACTION" == "install" ]]; then
+  V0_UNITS=()
+  for u in relay-rs.service relay-rs-master.service relay-rs-node.service; do
+    if systemctl list-unit-files "$u" 2>/dev/null | grep -q "^$u"; then
+      V0_UNITS+=("$u")
+    fi
+  done
+  if (( ${#V0_UNITS[@]} > 0 )); then
+    echo ""
+    echo "⚠️  检测到旧版 v0 服务仍在系统里（与 v2 不兼容，会占用 9090/19090 等端口）："
+    printf '     • %s\n' "${V0_UNITS[@]}"
+    read -rp "   停止并禁用？[Y/n]: " _v0
+    if [[ "${_v0,,}" != "n" ]]; then
+      for u in "${V0_UNITS[@]}"; do
+        systemctl disable --now "$u" 2>/dev/null || true
+        rm -f "/etc/systemd/system/$u"
+      done
+      rm -f /usr/local/bin/relay-rs
+      systemctl daemon-reload
+      echo "   ✅ 旧 v0 已清理"
+    fi
   fi
 fi
 
