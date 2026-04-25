@@ -456,30 +456,40 @@ if ! systemctl is-active --quiet "$SERVICE_NAME"; then
   exit 1
 fi
 
-# ── Discourse SSO bootstrap (optional) ───────────────────────────
+# ── Discourse SSO bootstrap (required) ───────────────────────────
 echo ""
-echo "─── Discourse SSO 配置（可选） ───"
-echo "面板登录走 Discourse Connect。如果不配，访问面板会得到"
-echo "  {\"error\":\"未配置 Discourse SSO\"}。"
-echo "可以先跳过，事后再用 \`relay-master discourse-set --url ...\` 设置。"
-read -rp "现在配置 Discourse SSO？[y/N]: " _disc
-if [[ "${_disc,,}" == "y" ]]; then
+echo "─── Discourse SSO 配置（必填） ───"
+echo "面板登录唯一走 Discourse Connect。不配完整就装完了也登不进面板。"
+echo "在你的 Discourse 后台 Admin → Settings → Login 启用 enable_discourse_connect_provider，"
+echo "并设置 discourse_connect_provider_secrets，secret 在那里生成。"
+echo ""
+DISCOURSE_URL=""
+DISCOURSE_SECRET=""
+while [[ -z "$DISCOURSE_URL" || -z "$DISCOURSE_SECRET" ]]; do
   read -rp "  Discourse 站点 URL (如 https://forum.example.com): " DISCOURSE_URL
-  if [[ -n "$DISCOURSE_URL" ]]; then
-    read -rsp "  Discourse SSO secret (回车确认，不会显示): " DISCOURSE_SECRET
-    echo
-    if [[ -n "$DISCOURSE_SECRET" ]]; then
-      # 走 stdin 不走 argv，避免 /proc/cmdline 泄露
-      if ( set -a; . "$ENV_FILE"; set +a; \
-           printf '%s' "$DISCOURSE_SECRET" | "$INSTALL_BIN" discourse-set --url "$DISCOURSE_URL" ); then
-        echo "  ✅ Discourse SSO 已配置"
-      else
-        echo "  ⚠️  写入失败，可稍后手动: $INSTALL_BIN discourse-set --url <URL> < <(echo -n <SECRET>)"
-      fi
-    fi
-    unset DISCOURSE_SECRET
+  if [[ -z "$DISCOURSE_URL" ]]; then
+    echo "    ❌ URL 不能为空"
+    continue
   fi
+  if [[ ! "$DISCOURSE_URL" =~ ^https?:// ]]; then
+    echo "    ❌ 必须以 http:// 或 https:// 开头"
+    DISCOURSE_URL=""; continue
+  fi
+  read -rsp "  Discourse SSO secret (输入不显示，回车确认): " DISCOURSE_SECRET
+  echo
+  if [[ -z "$DISCOURSE_SECRET" ]]; then
+    echo "    ❌ secret 不能为空"
+    DISCOURSE_URL=""; continue
+  fi
+done
+
+if ! ( set -a; . "$ENV_FILE"; set +a; \
+       printf '%s' "$DISCOURSE_SECRET" | "$INSTALL_BIN" discourse-set --url "$DISCOURSE_URL" ); then
+  echo "❌ 写入 Discourse 配置失败，install 中止"
+  exit 1
 fi
+unset DISCOURSE_SECRET
+echo "  ✅ Discourse SSO 已配置（master 30s 内自动重载）"
 
 # ── Export CA bundle ─────────────────────────────────────────────
 CA_B64=$(RELAY_MASTER_CA_DIR="$CA_DIR" "$INSTALL_BIN" ca-show --base64)
